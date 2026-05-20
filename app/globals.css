@@ -73,6 +73,31 @@ select {
   padding-bottom: 9px !important;
 }
 
+.pdf-export .overflow-x-auto {
+  overflow: visible !important;
+}
+
+.pdf-export table {
+  min-width: 0 !important;
+  width: 100% !important;
+  table-layout: fixed !important;
+  font-size: 11px !important;
+}
+
+.pdf-export th,
+.pdf-export td {
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+  white-space: normal !important;
+  word-break: normal !important;
+  overflow-wrap: anywhere !important;
+}
+
+.pdf-export th {
+  font-size: 9px !important;
+  line-height: 1.15 !important;
+}
+
 .pdf-export .space-y-3 > :not([hidden]) ~ :not([hidden]) {
   margin-top: 1rem !important;
 }
@@ -85,9 +110,9 @@ select {
   position: absolute;
   left: -10000px;
   top: 0;
-  width: 1180px;
+  width: 1320px;
   background: #f7f8fa;
-  padding: 24px;
+  padding: 16px;
 }
 
 .export-page {

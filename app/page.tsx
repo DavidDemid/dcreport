@@ -29,8 +29,8 @@ import {
 } from "recharts";
 import clsx from "clsx";
 import { Analytics, buildAnalytics, formatCurrency, formatNumber, formatPercent } from "@/lib/analytics";
-import { CRMRecord, parseWorkbook } from "@/lib/crm";
-import { FinanceData, parseFinanceWorkbook } from "@/lib/finance";
+import { CRMRecord, monthKey, parseWorkbook } from "@/lib/crm";
+import { FinanceChannelCostRecord, FinanceData, parseFinanceWorkbook } from "@/lib/finance";
 
 type Tab = "overview" | "sources" | "conversion" | "cohorts" | "quality";
 
@@ -70,7 +70,7 @@ const panelHelp: Record<string, string> = {
   "Conversion by channel": "Compares channel volume and conversion quality side by side.",
   "Conversion by service": "Compares service volume and conversion quality side by side.",
   "Monthly cohorts": "Groups leads by creation month and tracks payment timing using real first_payment_at dates only.",
-  "Service cohort snapshot": "Recent monthly cohorts split by normalized product/service, so cohort quality is not hidden by the total average.",
+  "Service cohorts": "Separate cohort tables by normalized product/service. Each service shows latest 10 monthly cohorts and payment timing.",
   "Cohort conversion trend": "Compares cohort quality: active-qualified rate, current paid proxy, paid with date by M5, and rejected rate.",
   "Field completeness": "Shows how often important CRM fields are filled and whether metrics still depend on status proxies.",
 };
@@ -136,6 +136,68 @@ function filterFinanceData(finance: FinanceData | null, from: string, to: string
   return {
     monthly: finance.monthly.filter((record) => inRange(record.month)),
     channelCosts: finance.channelCosts.filter((record) => inRange(record.month)),
+  };
+}
+
+function allocateFinanceToRecords(finance: FinanceData | undefined, baseRecords: CRMRecord[], selectedRecords: CRMRecord[]): FinanceData | undefined {
+  if (!finance) return undefined;
+  if (baseRecords.length === selectedRecords.length) return finance;
+
+  const countBySourceMonth = (records: CRMRecord[]) => {
+    const map = new Map<string, number>();
+    for (const record of records) {
+      const month = monthKey(record.createdAt);
+      if (month === "Unknown") continue;
+      const key = `${record.source}|||${month}`;
+      map.set(key, (map.get(key) ?? 0) + 1);
+    }
+    return map;
+  };
+
+  const baseBySourceMonth = countBySourceMonth(baseRecords);
+  const selectedBySourceMonth = countBySourceMonth(selectedRecords);
+  const channelCosts: FinanceChannelCostRecord[] = finance.channelCosts
+    .map((record) => {
+      const key = `${record.source}|||${record.month}`;
+      const baseCount = baseBySourceMonth.get(key) ?? 0;
+      const selectedCount = selectedBySourceMonth.get(key) ?? 0;
+      return {
+        ...record,
+        amount: baseCount ? record.amount * (selectedCount / baseCount) : 0,
+      };
+    })
+    .filter((record) => record.amount > 0);
+
+  const allocatedCostByMonth = new Map<string, number>();
+  for (const cost of channelCosts) {
+    allocatedCostByMonth.set(cost.month, (allocatedCostByMonth.get(cost.month) ?? 0) + cost.amount);
+  }
+
+  const baseByMonth = new Map<string, number>();
+  const selectedByMonth = new Map<string, number>();
+  for (const record of baseRecords) {
+    const month = monthKey(record.createdAt);
+    if (month !== "Unknown") baseByMonth.set(month, (baseByMonth.get(month) ?? 0) + 1);
+  }
+  for (const record of selectedRecords) {
+    const month = monthKey(record.createdAt);
+    if (month !== "Unknown") selectedByMonth.set(month, (selectedByMonth.get(month) ?? 0) + 1);
+  }
+
+  return {
+    channelCosts,
+    monthly: finance.monthly.map((record) => {
+      const baseCount = baseByMonth.get(record.month) ?? 0;
+      const selectedCount = selectedByMonth.get(record.month) ?? 0;
+      const share = baseCount ? selectedCount / baseCount : 0;
+      return {
+        ...record,
+        revenue: record.revenue * share,
+        marketingCost: allocatedCostByMonth.get(record.month) ?? record.marketingCost * share,
+        profitAfterMarketing: record.profitAfterMarketing * share,
+        signedContracts: record.signedContracts * share,
+      };
+    }),
   };
 }
 
@@ -258,16 +320,18 @@ function Panel({
   children,
   action,
   help,
+  exportSplit = false,
 }: {
   title: string;
   children: React.ReactNode;
   action?: React.ReactNode;
   help?: string;
+  exportSplit?: boolean;
 }) {
   const helpText = help ?? panelHelp[title];
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <section className={clsx("rounded-lg border border-slate-200 bg-white p-5 shadow-sm", exportSplit && "pdf-split-ok")}>
       <div className="mb-4 flex items-center justify-between gap-4">
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="text-base font-semibold text-slate-950">{title}</h2>
@@ -285,6 +349,65 @@ function PercentBar({ value, color = "bg-blue-600" }: { value: number; color?: s
     <div className="h-2 w-full rounded-full bg-slate-100">
       <div className={clsx("h-2 rounded-full", color)} style={{ width: `${Math.min(value * 100, 100)}%` }} />
     </div>
+  );
+}
+
+function ServiceFilter({
+  options,
+  selected,
+  onChange,
+}: {
+  options: string[];
+  selected: string[];
+  onChange: (services: string[]) => void;
+}) {
+  const allSelected = !selected.length || selected.length === options.length;
+  const label = allSelected
+    ? "All services"
+    : selected.length === 1
+      ? selected[0]
+      : `${selected.length} services`;
+
+  function toggle(service: string) {
+    const current = allSelected ? options : selected;
+    const next = current.includes(service)
+      ? current.filter((item) => item !== service)
+      : [...current, service];
+    onChange(next.length === options.length ? [] : next);
+  }
+
+  return (
+    <details className="relative">
+      <summary className="flex h-10 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">
+        <Filter className="h-4 w-4" />
+        <span className="max-w-48 truncate">{label}</span>
+      </summary>
+      <div className="absolute right-0 z-20 mt-2 w-80 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+        <div className="mb-2 flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
+          <button
+            type="button"
+            onClick={() => onChange([])}
+            className="rounded-md px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+          >
+            All
+          </button>
+          <span className="text-xs text-slate-500">{options.length} available</span>
+        </div>
+        <div className="grid max-h-72 gap-1 overflow-y-auto">
+          {options.map((service) => (
+            <label key={service} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 text-sm text-slate-700 hover:bg-slate-50">
+              <input
+                type="checkbox"
+                checked={allSelected || selected.includes(service)}
+                onChange={() => toggle(service)}
+                className="mt-0.5"
+              />
+              <span className="leading-snug">{service}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+    </details>
   );
 }
 
@@ -406,45 +529,51 @@ function Overview({ analytics }: { analytics: Analytics }) {
 
 function BucketTable({ rows, kind }: { rows: Analytics["sourceRows"]; kind: "source" | "service" }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[1280px] text-sm">
+    <div className="overflow-hidden">
+      <table className="w-full table-fixed text-xs lg:text-sm">
+        <colgroup>
+          <col className="w-[15%]" />
+          {Array.from({ length: 14 }).map((_, index) => (
+            <col key={index} />
+          ))}
+        </colgroup>
         <thead>
-          <tr className="border-b border-slate-200 text-left text-xs uppercase text-slate-500 [&>th]:whitespace-nowrap">
-            <th className="py-3 pr-4">{kind === "source" ? "Channel" : "Service"}</th>
-            <th className="py-3 pr-4 text-right">Leads</th>
-            <th className="py-3 pr-4 text-right">Clients</th>
-            <th className="py-3 pr-4 text-right">Full paid</th>
-            <th className="py-3 pr-4 text-right">Share</th>
-            <th className="py-3 pr-4 text-right">Relevant</th>
-            <th className="py-3 pr-4 text-right">Qualified / Active</th>
-            <th className="py-3 pr-4 text-right">Rejected</th>
-            <th className="py-3 pr-4 text-right">Agr. sent</th>
-            <th className="py-3 pr-4 text-right">Agr. signed</th>
-            <th className="py-3 pr-4 text-right">Client rate</th>
-            <th className="py-3 text-right">Full paid rate</th>
-            <th className="py-3 pl-4 text-right">Spend</th>
-            <th className="py-3 pl-4 text-right">CPL</th>
-            <th className="py-3 pl-4 text-right">CAC</th>
+          <tr className="border-b border-slate-200 text-left text-[11px] uppercase leading-tight text-slate-500">
+            <th className="px-1.5 py-3">{kind === "source" ? "Channel" : "Service"}</th>
+            <th className="px-1.5 py-3 text-right">Leads</th>
+            <th className="px-1.5 py-3 text-right">Clients</th>
+            <th className="px-1.5 py-3 text-right">Full paid</th>
+            <th className="px-1.5 py-3 text-right">Share</th>
+            <th className="px-1.5 py-3 text-right">Relevant</th>
+            <th className="px-1.5 py-3 text-right">Qualified / Active</th>
+            <th className="px-1.5 py-3 text-right">Rejected</th>
+            <th className="px-1.5 py-3 text-right">Agr. sent</th>
+            <th className="px-1.5 py-3 text-right">Agr. signed</th>
+            <th className="px-1.5 py-3 text-right">Client rate</th>
+            <th className="px-1.5 py-3 text-right">Full paid rate</th>
+            <th className="px-1.5 py-3 text-right">Spend</th>
+            <th className="px-1.5 py-3 text-right">CPL</th>
+            <th className="px-1.5 py-3 text-right">CAC</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.name} className="border-b border-slate-100">
-              <td className="max-w-[280px] py-3 pr-4 font-medium leading-snug text-slate-950">{row.name}</td>
-              <td className="py-3 pr-4 text-right">{formatNumber(row.leads)}</td>
-              <td className="py-3 pr-4 text-right font-medium text-slate-950">{formatNumber(row.clients)}</td>
-              <td className="py-3 pr-4 text-right font-medium text-slate-950">{formatNumber(row.fullPaidClients)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.share)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.relevantStrictRate)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.qualifiedActiveRate)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.rejectionRate)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.agreementSentRate)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.agreementSignedRate)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.clientRate)}</td>
-              <td className="py-3 text-right">{formatPercent(row.fullPaidClientRate)}</td>
-              <td className="py-3 pl-4 text-right">{formatCurrency(row.marketingSpend)}</td>
-              <td className="py-3 pl-4 text-right">{formatCurrency(row.cpl)}</td>
-              <td className="py-3 pl-4 text-right">{formatCurrency(row.cac)}</td>
+              <td className="break-words px-1.5 py-3 font-medium leading-snug text-slate-950">{row.name}</td>
+              <td className="px-1.5 py-3 text-right">{formatNumber(row.leads)}</td>
+              <td className="px-1.5 py-3 text-right font-medium text-slate-950">{formatNumber(row.clients)}</td>
+              <td className="px-1.5 py-3 text-right font-medium text-slate-950">{formatNumber(row.fullPaidClients)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.share)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.relevantStrictRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.qualifiedActiveRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.rejectionRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.agreementSentRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.agreementSignedRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.clientRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.fullPaidClientRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatCurrency(row.marketingSpend)}</td>
+              <td className="px-1.5 py-3 text-right">{formatCurrency(row.cpl)}</td>
+              <td className="px-1.5 py-3 text-right">{formatCurrency(row.cac)}</td>
             </tr>
           ))}
         </tbody>
@@ -453,45 +582,52 @@ function BucketTable({ rows, kind }: { rows: Analytics["sourceRows"]; kind: "sou
   );
 }
 
-function ServiceChannelTable({ rows }: { rows: Analytics["serviceChannelRows"] }) {
+function ServiceChannelTable({ rows, showService = true }: { rows: Analytics["serviceChannelRows"]; showService?: boolean }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[1260px] text-sm">
+    <div className="overflow-hidden">
+      <table className="w-full table-fixed text-xs lg:text-sm">
+        <colgroup>
+          {showService ? <col className="w-[15%]" /> : null}
+          <col className={showService ? "w-[12%]" : "w-[15%]"} />
+          {Array.from({ length: 11 }).map((_, index) => (
+            <col key={index} />
+          ))}
+        </colgroup>
         <thead>
-          <tr className="border-b border-slate-200 text-left text-xs uppercase text-slate-500 [&>th]:whitespace-nowrap">
-            <th className="py-3 pr-4">Service</th>
-            <th className="py-3 pr-4">Channel</th>
-            <th className="py-3 pr-4 text-right">Leads</th>
-            <th className="py-3 pr-4 text-right">Clients</th>
-            <th className="py-3 pr-4 text-right">Full paid</th>
-            <th className="py-3 pr-4 text-right">Relevant</th>
-            <th className="py-3 pr-4 text-right">Qualified</th>
-            <th className="py-3 pr-4 text-right">Rejected</th>
-            <th className="py-3 pr-4 text-right">Agr. sent</th>
-            <th className="py-3 pr-4 text-right">Agr. signed</th>
-            <th className="py-3 pr-4 text-right">Spend</th>
-            <th className="py-3 pr-4 text-right">CPL</th>
-            <th className="py-3 text-right">CAC</th>
+          <tr className="border-b border-slate-200 text-left text-[11px] uppercase leading-tight text-slate-500">
+            {showService ? <th className="px-1.5 py-3">Service</th> : null}
+            <th className="px-1.5 py-3">Channel</th>
+            <th className="px-1.5 py-3 text-right">Leads</th>
+            <th className="px-1.5 py-3 text-right">Clients</th>
+            <th className="px-1.5 py-3 text-right">Full paid</th>
+            <th className="px-1.5 py-3 text-right">Relevant</th>
+            <th className="px-1.5 py-3 text-right">Qualified</th>
+            <th className="px-1.5 py-3 text-right">Rejected</th>
+            <th className="px-1.5 py-3 text-right">Agr. sent</th>
+            <th className="px-1.5 py-3 text-right">Agr. signed</th>
+            <th className="px-1.5 py-3 text-right">Spend</th>
+            <th className="px-1.5 py-3 text-right">CPL</th>
+            <th className="px-1.5 py-3 text-right">CAC</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={`${row.service}-${row.source}`} className="border-b border-slate-100">
-              <td className="max-w-[260px] py-3 pr-4 font-medium leading-snug text-slate-950">{row.service}</td>
-              <td className="max-w-[180px] py-3 pr-4 leading-snug text-slate-700">{row.source}</td>
-              <td className="py-3 pr-4 text-right">{formatNumber(row.leads)}</td>
-              <td className="py-3 pr-4 text-right font-medium text-slate-950">{formatNumber(row.clients)}</td>
-              <td className="py-3 pr-4 text-right font-medium text-slate-950">{formatNumber(row.fullPaidClients)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.relevantStrictRate)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.qualifiedActiveRate)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.rejectionRate)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.agreementSentRate)}</td>
-              <td className="py-3 pr-4 text-right">{formatPercent(row.agreementSignedRate)}</td>
-              <td className="py-3 pr-4 text-right">
+              {showService ? <td className="break-words px-1.5 py-3 font-medium leading-snug text-slate-950">{row.service}</td> : null}
+              <td className="break-words px-1.5 py-3 leading-snug text-slate-700">{row.source}</td>
+              <td className="px-1.5 py-3 text-right">{formatNumber(row.leads)}</td>
+              <td className="px-1.5 py-3 text-right font-medium text-slate-950">{formatNumber(row.clients)}</td>
+              <td className="px-1.5 py-3 text-right font-medium text-slate-950">{formatNumber(row.fullPaidClients)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.relevantStrictRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.qualifiedActiveRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.rejectionRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.agreementSentRate)}</td>
+              <td className="px-1.5 py-3 text-right">{formatPercent(row.agreementSignedRate)}</td>
+              <td className="px-1.5 py-3 text-right">
                 <span title={row.attributionNote}>{formatCurrency(row.marketingSpend)}</span>
               </td>
-              <td className="py-3 pr-4 text-right">{formatCurrency(row.cpl)}</td>
-              <td className="py-3 text-right">{formatCurrency(row.cac)}</td>
+              <td className="px-1.5 py-3 text-right">{formatCurrency(row.cpl)}</td>
+              <td className="px-1.5 py-3 text-right">{formatCurrency(row.cac)}</td>
             </tr>
           ))}
         </tbody>
@@ -501,38 +637,25 @@ function ServiceChannelTable({ rows }: { rows: Analytics["serviceChannelRows"] }
 }
 
 function Sources({ analytics }: { analytics: Analytics }) {
+  const serviceChannelGroups = useMemo(() => {
+    const grouped = new Map<string, Analytics["serviceChannelRows"]>();
+    for (const row of analytics.serviceChannelRows) {
+      grouped.set(row.service, [...(grouped.get(row.service) ?? []), row]);
+    }
+    return [...grouped.entries()]
+      .map(([service, rows]) => ({
+        service,
+        rows: rows.sort((a, b) => b.leads - a.leads),
+        leads: rows.reduce((sum, row) => sum + row.leads, 0),
+        clients: rows.reduce((sum, row) => sum + row.clients, 0),
+        fullPaidClients: rows.reduce((sum, row) => sum + row.fullPaidClients, 0),
+        spend: rows.reduce((sum, row) => sum + row.marketingSpend, 0),
+      }))
+      .sort((a, b) => b.leads - a.leads);
+  }, [analytics.serviceChannelRows]);
+
   return (
     <div className="space-y-5">
-      <Panel title="Decision flags">
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {analytics.decisionInsights.map((item) => (
-            <div
-              key={`${item.title}-${item.detail}`}
-              className={clsx(
-                "rounded-lg border p-4",
-                item.tone === "green" && "border-emerald-200 bg-emerald-50",
-                item.tone === "amber" && "border-amber-200 bg-amber-50",
-                item.tone === "red" && "border-rose-200 bg-rose-50",
-                item.tone === "blue" && "border-blue-200 bg-blue-50",
-              )}
-            >
-              <div className="text-sm font-semibold text-slate-950">{item.title}</div>
-              <div className="mt-2 text-sm leading-5 text-slate-700">{item.detail}</div>
-            </div>
-          ))}
-        </div>
-      </Panel>
-
-      <Panel title="Attribution and CAC limitations">
-        <div className="space-y-2 text-sm leading-6 text-slate-700">
-          {analytics.attributionWarnings.map((warning) => (
-            <div key={warning} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-              {warning}
-            </div>
-          ))}
-        </div>
-      </Panel>
-
       <div className="grid gap-5 xl:grid-cols-2">
         <Panel title="Lead acquisition by channel">
           <div className="h-[340px]">
@@ -571,9 +694,33 @@ function Sources({ analytics }: { analytics: Analytics }) {
         <BucketTable rows={analytics.servicePerformanceRows} kind="service" />
       </Panel>
 
-      <Panel title="Channel performance by service">
-        <ServiceChannelTable rows={analytics.serviceChannelRows} />
-      </Panel>
+      {serviceChannelGroups.map((group) => (
+        <Panel
+          key={group.service}
+          title={`Channel performance: ${group.service}`}
+          help="Channel metrics inside this service only. Spend is allocated from finance channel spend by lead share in the selected service filter."
+        >
+          <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-medium text-slate-500">Leads</div>
+              <div className="mt-1 text-lg font-semibold text-slate-950">{formatNumber(group.leads)}</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-medium text-slate-500">Clients</div>
+              <div className="mt-1 text-lg font-semibold text-slate-950">{formatNumber(group.clients)}</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-medium text-slate-500">Full paid</div>
+              <div className="mt-1 text-lg font-semibold text-slate-950">{formatNumber(group.fullPaidClients)}</div>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-medium text-slate-500">Allocated spend</div>
+              <div className="mt-1 text-lg font-semibold text-slate-950">{formatCurrency(group.spend)}</div>
+            </div>
+          </div>
+          <ServiceChannelTable rows={group.rows} showService={false} />
+        </Panel>
+      ))}
 
       <Panel title="Marketing efficiency by channel">
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -831,6 +978,20 @@ function heat(value: number) {
 }
 
 function Cohorts({ analytics }: { analytics: Analytics }) {
+  const serviceCohortGroups = useMemo(() => {
+    const groups = new Map<string, Analytics["serviceCohorts"]>();
+    for (const row of analytics.serviceCohorts) {
+      groups.set(row.service, [...(groups.get(row.service) ?? []), row]);
+    }
+    return [...groups.entries()]
+      .map(([service, rows]) => ({
+        service,
+        rows: rows.sort((a, b) => b.cohort.localeCompare(a.cohort)).slice(0, 10),
+        totalLeads: rows.reduce((sum, row) => sum + row.leads, 0),
+      }))
+      .sort((a, b) => b.totalLeads - a.totalLeads);
+  }, [analytics.serviceCohorts]);
+
   return (
     <div className="space-y-5">
       <Note>
@@ -838,42 +999,42 @@ function Cohorts({ analytics }: { analytics: Analytics }) {
       </Note>
 
       <Panel title="Monthly cohorts">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[980px] text-sm">
+        <div className="overflow-hidden">
+          <table className="w-full table-fixed text-xs lg:text-sm">
             <thead>
-              <tr className="border-b border-slate-200 text-left text-xs uppercase text-slate-500">
-                <th className="py-3 pr-4">Cohort</th>
-                <th className="py-3 pr-4 text-right">Leads</th>
-                <th className="py-3 pr-4 text-right">Qualified / Active</th>
-                <th className="py-3 pr-4 text-right">Paid</th>
-                <th className="py-3 pr-4 text-right">Rejected</th>
+              <tr className="border-b border-slate-200 text-left text-[11px] uppercase leading-tight text-slate-500">
+                <th className="px-1.5 py-3">Cohort</th>
+                <th className="px-1.5 py-3 text-right">Leads</th>
+                <th className="px-1.5 py-3 text-right">Qualified / Active</th>
+                <th className="px-1.5 py-3 text-right">Paid</th>
+                <th className="px-1.5 py-3 text-right">Rejected</th>
                 {["M0", "M1", "M2", "M3", "M4", "M5"].map((label) => (
-                  <th key={label} className="py-3 pr-2 text-center">
+                  <th key={label} className="px-1.5 py-3 text-center">
                     {label}
                   </th>
                 ))}
-                <th className="py-3 text-right">Paid date unknown</th>
+                <th className="px-1.5 py-3 text-right">Paid date unknown</th>
               </tr>
             </thead>
             <tbody>
               {analytics.cohorts.map((row) => (
                 <tr key={row.cohort} className="border-b border-slate-100">
-                  <td className="py-3 pr-4 font-medium text-slate-950">{row.label}</td>
-                  <td className="py-3 pr-4 text-right">{formatNumber(row.leads)}</td>
-                  <td className="py-3 pr-4 text-right">{formatPercent(row.qualifiedActiveRate)}</td>
-                  <td className="py-3 pr-4 text-right">{formatPercent(row.clientRate)}</td>
-                  <td className="py-3 pr-4 text-right">{formatPercent(row.rejectionRate)}</td>
+                  <td className="px-1.5 py-3 font-medium text-slate-950">{row.label}</td>
+                  <td className="px-1.5 py-3 text-right">{formatNumber(row.leads)}</td>
+                  <td className="px-1.5 py-3 text-right">{formatPercent(row.qualifiedActiveRate)}</td>
+                  <td className="px-1.5 py-3 text-right">{formatPercent(row.clientRate)}</td>
+                  <td className="px-1.5 py-3 text-right">{formatPercent(row.rejectionRate)}</td>
                   {(["m0", "m1", "m2", "m3", "m4", "m5"] as const).map((key) => (
-                    <td key={key} className="py-2 pr-2 text-center">
+                    <td key={key} className="px-1.5 py-2 text-center">
                       <span
-                        className="inline-flex min-w-16 justify-center rounded-md px-2 py-1 font-medium text-slate-950"
+                        className="inline-flex min-w-12 justify-center rounded-md px-1.5 py-1 font-medium text-slate-950"
                         style={{ backgroundColor: heat(row[key]) }}
                       >
                         {formatPercent(row[key])}
                       </span>
                     </td>
                   ))}
-                  <td className="py-3 text-right">
+                  <td className="px-1.5 py-3 text-right">
                     <div className="font-medium text-slate-950">{formatPercent(row.paidDateUnknownRate)}</div>
                     <div className="text-xs text-slate-500">{formatNumber(row.paidDateUnknown)}</div>
                   </td>
@@ -884,40 +1045,64 @@ function Cohorts({ analytics }: { analytics: Analytics }) {
         </div>
       </Panel>
 
-      <Panel title="Service cohort snapshot" help="Recent cohort rows split by normalized service. M0-M3 use real first_payment_at only; paid date unknown is kept separate.">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[860px] text-sm">
-            <thead>
-              <tr className="border-b border-slate-200 text-left text-xs uppercase text-slate-500">
-                <th className="py-3 pr-4">Cohort</th>
-                <th className="py-3 pr-4">Service</th>
-                <th className="py-3 pr-4 text-right">Leads</th>
-                <th className="py-3 pr-4 text-right">Current paid</th>
-                <th className="py-3 pr-4 text-right">M0</th>
-                <th className="py-3 pr-4 text-right">M1</th>
-                <th className="py-3 pr-4 text-right">M2</th>
-                <th className="py-3 pr-4 text-right">M3</th>
-                <th className="py-3 text-right">Paid date unknown</th>
-              </tr>
-            </thead>
-            <tbody>
-              {analytics.serviceCohorts.map((row) => (
-                <tr key={`${row.service}-${row.cohort}`} className="border-b border-slate-100">
-                  <td className="py-3 pr-4 font-medium text-slate-950">{row.label}</td>
-                  <td className="max-w-[260px] truncate py-3 pr-4 text-slate-700">{row.service}</td>
-                  <td className="py-3 pr-4 text-right">{formatNumber(row.leads)}</td>
-                  <td className="py-3 pr-4 text-right">{formatPercent(row.currentPaidRate)}</td>
-                  <td className="py-3 pr-4 text-right">{formatPercent(row.m0)}</td>
-                  <td className="py-3 pr-4 text-right">{formatPercent(row.m1)}</td>
-                  <td className="py-3 pr-4 text-right">{formatPercent(row.m2)}</td>
-                  <td className="py-3 pr-4 text-right">{formatPercent(row.m3)}</td>
-                  <td className="py-3 text-right">{formatPercent(row.paidDateUnknownRate)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold text-slate-950">Service cohorts</h2>
+          <InfoHint text="Separate cohort table per service. Each table shows the latest 10 creation-month cohorts for that service. M0-M5 use real first_payment_at only." />
         </div>
-      </Panel>
+      </section>
+
+      {serviceCohortGroups.map(({ service, rows }) => (
+        <Panel key={service} title={`Service cohorts: ${service}`}>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-medium text-slate-500">Latest {rows.length} cohorts</span>
+          </div>
+          <div className="overflow-hidden">
+          <table className="w-full table-fixed text-xs lg:text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-[11px] uppercase leading-tight text-slate-500">
+                  <th className="px-1.5 py-3">Cohort</th>
+                  <th className="px-1.5 py-3 text-right">Leads</th>
+                  <th className="px-1.5 py-3 text-right">Qualified / Active</th>
+                  <th className="px-1.5 py-3 text-right">Paid</th>
+                  <th className="px-1.5 py-3 text-right">Rejected</th>
+                  {["M0", "M1", "M2", "M3", "M4", "M5"].map((label) => (
+                    <th key={label} className="px-1.5 py-3 text-center">
+                      {label}
+                    </th>
+                  ))}
+                  <th className="px-1.5 py-3 text-right">Paid date unknown</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={`${row.service}-${row.cohort}`} className="border-b border-slate-100">
+                    <td className="px-1.5 py-3 font-medium text-slate-950">{row.label}</td>
+                    <td className="px-1.5 py-3 text-right">{formatNumber(row.leads)}</td>
+                    <td className="px-1.5 py-3 text-right">{formatPercent(row.qualifiedActiveRate)}</td>
+                    <td className="px-1.5 py-3 text-right">{formatPercent(row.currentPaidRate)}</td>
+                    <td className="px-1.5 py-3 text-right">{formatPercent(row.rejectionRate)}</td>
+                    {(["m0", "m1", "m2", "m3", "m4", "m5"] as const).map((key) => (
+                      <td key={key} className="px-1.5 py-2 text-center">
+                        <span
+                          className="inline-flex min-w-12 justify-center rounded-md px-1.5 py-1 font-medium text-slate-950"
+                          style={{ backgroundColor: heat(row[key]) }}
+                        >
+                          {formatPercent(row[key])}
+                        </span>
+                      </td>
+                    ))}
+                    <td className="px-1.5 py-3 text-right">
+                      <div className="font-medium text-slate-950">{formatPercent(row.paidDateUnknownRate)}</div>
+                      <div className="text-xs text-slate-500">{formatNumber(row.paidDateUnknown)}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      ))}
 
       <Panel title="Cohort conversion trend">
         <div className="h-[360px]">
@@ -955,7 +1140,7 @@ function Quality({ analytics }: { analytics: Analytics }) {
         <KpiCard label="Full payment coverage" value={formatPercent(analytics.fullPaidClientRate)} sub="Full payment or completed" help="Share of leads that reached full payment or completed status." tone="green" />
       </div>
 
-      <Panel title="Field completeness">
+      <Panel title="Field completeness" exportSplit>
         <div className="space-y-6">
           {fieldGroups.map((group) => (
             <section key={group}>
@@ -1008,6 +1193,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
   const [uniqueOnly, setUniqueOnly] = useState(false);
+  const [selectedServices, setSelectedServices] = useState<string[]>([]);
   const [isExporting, setIsExporting] = useState(false);
   const [exportMode, setExportMode] = useState<"none" | "current" | "all">("none");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -1057,7 +1243,7 @@ export default function Home() {
     };
   }, []);
 
-  const filteredRecords = useMemo(() => {
+  const dateAndQualityFilteredRecords = useMemo(() => {
     const fromDate = dateFromInput(dateRange.from);
     const toDate = dateFromInput(dateRange.to, true);
 
@@ -1071,9 +1257,30 @@ export default function Home() {
     });
   }, [dateRange.from, dateRange.to, records, uniqueOnly]);
 
-  const filteredFinance = useMemo(
+  const serviceOptions = useMemo(
+    () => [...new Set(dateAndQualityFilteredRecords.map((record) => record.reportingService))]
+      .sort((a, b) => a.localeCompare(b)),
+    [dateAndQualityFilteredRecords],
+  );
+
+  useEffect(() => {
+    setSelectedServices((current) => current.filter((service) => serviceOptions.includes(service)));
+  }, [serviceOptions]);
+
+  const filteredRecords = useMemo(() => {
+    if (!selectedServices.length || selectedServices.length === serviceOptions.length) return dateAndQualityFilteredRecords;
+    const selected = new Set(selectedServices);
+    return dateAndQualityFilteredRecords.filter((record) => selected.has(record.reportingService));
+  }, [dateAndQualityFilteredRecords, selectedServices, serviceOptions.length]);
+
+  const dateFilteredFinance = useMemo(
     () => filterFinanceData(financeData, dateRange.from, dateRange.to),
     [dateRange.from, dateRange.to, financeData],
+  );
+
+  const filteredFinance = useMemo(
+    () => allocateFinanceToRecords(dateFilteredFinance, dateAndQualityFilteredRecords, filteredRecords),
+    [dateAndQualityFilteredRecords, dateFilteredFinance, filteredRecords],
   );
 
   const analytics = useMemo(() => buildAnalytics(filteredRecords, filteredFinance), [filteredFinance, filteredRecords]);
@@ -1137,7 +1344,7 @@ export default function Home() {
       const pdf = new jsPDF("p", "mm", "a4");
       const pageWidth = pdf.internal.pageSize.getWidth();
       const pageHeight = pdf.internal.pageSize.getHeight();
-      const margin = 8;
+      const margin = 4;
       const contentWidth = pageWidth - margin * 2;
       const contentHeight = pageHeight - margin * 2;
       let firstPage = true;
@@ -1187,13 +1394,14 @@ export default function Home() {
           const imageHeight = (image.height * contentWidth) / image.width;
           const remainingHeight = pageHeight - margin - cursorY;
           const shouldMoveWholeBlock = imageHeight <= contentHeight && imageHeight > remainingHeight;
-          if (shouldMoveWholeBlock && blocksOnCurrentPdfPage > 0) {
+          const canSplitBlock = block.classList.contains("pdf-split-ok");
+          if (shouldMoveWholeBlock && blocksOnCurrentPdfPage > 0 && !canSplitBlock) {
             pdf.addPage();
             cursorY = margin;
             blocksOnCurrentPdfPage = 0;
           }
 
-          if (imageHeight <= contentHeight) {
+          if (imageHeight <= contentHeight && !(canSplitBlock && imageHeight > remainingHeight && remainingHeight > 35)) {
             pdf.addImage(dataUrl, "PNG", margin, cursorY, contentWidth, imageHeight);
             cursorY += imageHeight + 5;
             blocksOnCurrentPdfPage += 1;
@@ -1265,6 +1473,7 @@ export default function Home() {
               </span>
               <span>{formatNumber(analytics.total)} rows</span>
               <span>{uniqueOnly ? "Unique leads only" : "All leads"}</span>
+              <span>{!selectedServices.length || selectedServices.length === serviceOptions.length ? "All services" : `${selectedServices.length} selected services`}</span>
               <span className="max-w-full truncate">Dataset: {fileName}</span>
               <span className="max-w-full truncate">Finance: {financeFileName}</span>
             </div>
@@ -1316,6 +1525,7 @@ export default function Home() {
               >
                 {uniqueOnly ? "Unique leads only" : "All leads"}
               </button>
+              <ServiceFilter options={serviceOptions} selected={selectedServices} onChange={setSelectedServices} />
             </div>
             <div className="flex flex-wrap items-center gap-2">
             <input

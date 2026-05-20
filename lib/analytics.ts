@@ -114,11 +114,16 @@ export type ServiceCohortRow = {
   cohort: string;
   label: string;
   leads: number;
+  qualifiedActiveRate: number;
   currentPaidRate: number;
+  rejectionRate: number;
   m0: number;
   m1: number;
   m2: number;
   m3: number;
+  m4: number;
+  m5: number;
+  paidDateUnknown: number;
   paidDateUnknownRate: number;
 };
 
@@ -531,7 +536,7 @@ function serviceCohortRows(records: CRMRecord[]): ServiceCohortRow[] {
       const clients = group.filter(isClient);
       const paidWithDate = clients.filter((record) => record.createdAt && record.firstPaymentAt);
       const paidDateUnknown = clients.filter((record) => !record.firstPaymentAt).length;
-      const byMonth = [0, 1, 2, 3].map((age) => {
+      const byMonth = [0, 1, 2, 3, 4, 5].map((age) => {
         const count = paidWithDate.filter((record) => record.createdAt && record.firstPaymentAt && monthDiff(record.createdAt, record.firstPaymentAt) <= age).length;
         return pct(count, leads);
       });
@@ -541,17 +546,21 @@ function serviceCohortRows(records: CRMRecord[]): ServiceCohortRow[] {
         cohort,
         label: monthLabel(cohort),
         leads,
+        qualifiedActiveRate: pct(group.filter(isQualifiedActive).length, leads),
         currentPaidRate: pct(clients.length, leads),
+        rejectionRate: pct(group.filter(isRejected).length, leads),
         m0: byMonth[0],
         m1: byMonth[1],
         m2: byMonth[2],
         m3: byMonth[3],
+        m4: byMonth[4],
+        m5: byMonth[5],
+        paidDateUnknown,
         paidDateUnknownRate: pct(paidDateUnknown, leads),
       };
     })
     .filter((row) => row.leads >= 3)
-    .sort((a, b) => b.cohort.localeCompare(a.cohort) || a.service.localeCompare(b.service))
-    .slice(0, 24);
+    .sort((a, b) => b.cohort.localeCompare(a.cohort) || a.service.localeCompare(b.service));
 }
 
 function sourceServiceMatrix(records: CRMRecord[]) {
