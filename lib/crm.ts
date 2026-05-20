@@ -42,6 +42,7 @@ export type CRMRecord = {
   paymentStatus: string;
   qualifiedService: string;
   analyticsService: string;
+  reportingService: string;
   analyticsServiceMethod: "qualified_service" | "original_service_interest" | "service_group";
   utmCampaign: string;
   utmContent: string;
@@ -150,10 +151,52 @@ function inferAnalyticsService(
   serviceGroup: string,
   originalServiceInterest: string,
   qualifiedService: string,
-): Pick<CRMRecord, "analyticsService" | "analyticsServiceMethod"> {
-  if (qualifiedService) return { analyticsService: qualifiedService, analyticsServiceMethod: "qualified_service" };
-  if (originalServiceInterest) return { analyticsService: originalServiceInterest, analyticsServiceMethod: "original_service_interest" };
-  return { analyticsService: serviceGroup || "Unknown", analyticsServiceMethod: "service_group" };
+): Pick<CRMRecord, "analyticsService" | "reportingService" | "analyticsServiceMethod"> {
+  const selected = qualifiedService || originalServiceInterest || serviceGroup || "Unknown";
+  const method = qualifiedService
+    ? "qualified_service"
+    : originalServiceInterest
+      ? "original_service_interest"
+      : "service_group";
+
+  return {
+    analyticsService: selected,
+    reportingService: normalizeReportingService(selected),
+    analyticsServiceMethod: method,
+  };
+}
+
+function normalizeReportingService(value: string): string {
+  const raw = value.trim();
+  const lower = raw.toLowerCase();
+  if (!raw || lower === "unknown") return "Other / Unknown";
+  if ((lower.includes("lithuan") || /\blt\b/.test(lower)) && lower.includes("citizen")) return "Lithuanian citizenship by descent";
+  if ((lower.includes("latv") || /\blv\b/.test(lower)) && lower.includes("citizen")) return "Latvian citizenship by descent";
+  if (
+    lower.includes("real estate") ||
+    lower.includes("real-estate") ||
+    ((lower.includes("latv") || /\blv\b/.test(lower)) && lower.includes("rbi") && lower.includes("estate"))
+  ) {
+    return "Latvia RBI through real estate";
+  }
+  if (
+    lower.includes("rbi") ||
+    lower.includes("residence through") ||
+    lower.includes("residence by") ||
+    (lower.includes("residence") && (lower.includes("company") || lower.includes("business")))
+  ) {
+    return "Residence through business / company";
+  }
+  if (
+    lower.includes("company") ||
+    lower.includes("business") ||
+    lower.includes("registration") ||
+    lower.includes("incorporation") ||
+    lower.includes("formation")
+  ) {
+    return "Company / business registration";
+  }
+  return "Other / Unknown";
 }
 
 export function normalizeRows(rows: RawCell[][]): CRMRecord[] {

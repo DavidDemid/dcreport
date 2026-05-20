@@ -26,6 +26,19 @@ export type BucketRow = {
   roas: number | null;
 };
 
+export type ServiceChannelRow = BucketRow & {
+  service: string;
+  source: string;
+  spendAllocation: "direct_channel" | "estimated_by_lead_share" | "none";
+  attributionNote: string;
+};
+
+export type DecisionInsight = {
+  title: string;
+  detail: string;
+  tone: "green" | "amber" | "red" | "blue";
+};
+
 export type MonthlyRow = {
   month: string;
   label: string;
@@ -96,6 +109,19 @@ export type CohortRow = {
   paidDateUnknownRate: number;
 };
 
+export type ServiceCohortRow = {
+  service: string;
+  cohort: string;
+  label: string;
+  leads: number;
+  currentPaidRate: number;
+  m0: number;
+  m1: number;
+  m2: number;
+  m3: number;
+  paidDateUnknownRate: number;
+};
+
 export type Analytics = {
   total: number;
   uniqueTotal: number;
@@ -127,12 +153,17 @@ export type Analytics = {
   monthly: MonthlyRow[];
   sourceRows: BucketRow[];
   serviceRows: BucketRow[];
+  servicePerformanceRows: BucketRow[];
+  serviceChannelRows: ServiceChannelRow[];
+  decisionInsights: DecisionInsight[];
+  attributionWarnings: string[];
   statusRows: { name: string; value: number; share: number }[];
   rejectionRows: { name: string; value: number; share: number }[];
   fieldCoverage: FieldCoverageRow[];
   cohorts: CohortRow[];
+  serviceCohorts: ServiceCohortRow[];
   topCountries: { name: string; value: number; share: number }[];
-  sourceServiceMatrix: { source: string; service: string; leads: number; clientRate: number }[];
+  sourceServiceMatrix: { source: string; service: string; leads: number; clients: number; fullPaidClients: number; clientRate: number }[];
   sourceMonthlyConversion: SourceMonthlyConversionRow[];
 };
 
@@ -211,6 +242,49 @@ function sumFinanceSourceSpend(finance: FinanceData | undefined, source: string)
     .reduce((sum, record) => sum + record.amount, 0) ?? 0;
 }
 
+function sourceSpendMap(finance?: FinanceData): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const cost of finance?.channelCosts ?? []) {
+    map.set(cost.source, (map.get(cost.source) ?? 0) + cost.amount);
+  }
+  return map;
+}
+
+function metricSummary(name: string, group: CRMRecord[], total: number, marketingSpend = 0): BucketRow {
+  const leads = group.length;
+  const relevantStrict = group.filter(isRelevantStrict).length;
+  const qualifiedActive = group.filter(isQualifiedActive).length;
+  const rejected = group.filter(isRejected).length;
+  const agreementSent = group.filter(hasAgreementSent).length;
+  const agreementSigned = group.filter(hasAgreementSigned).length;
+  const clients = group.filter(isClient).length;
+  const fullPaidClients = group.filter(isFullPaidClient).length;
+  return {
+    name,
+    leads,
+    share: pct(leads, total),
+    relevantStrict,
+    relevantStrictRate: pct(relevantStrict, leads),
+    qualifiedActive,
+    qualifiedActiveRate: pct(qualifiedActive, leads),
+    rejected,
+    rejectionRate: pct(rejected, leads),
+    agreementSent,
+    agreementSentRate: pct(agreementSent, leads),
+    agreementSigned,
+    agreementSignedRate: pct(agreementSigned, leads),
+    clients,
+    clientRate: pct(clients, leads),
+    fullPaidClients,
+    fullPaidClientRate: pct(fullPaidClients, leads),
+    marketingSpend,
+    cpl: ratio(marketingSpend, leads),
+    cpql: ratio(marketingSpend, qualifiedActive),
+    cac: ratio(marketingSpend, clients),
+    roas: null,
+  };
+}
+
 function bucketRows(records: CRMRecord[], getter: (record: CRMRecord) => string, limit: number, finance?: FinanceData): BucketRow[] {
   const total = records.length;
   const grouped = new Map<string, CRMRecord[]>();
@@ -221,39 +295,8 @@ function bucketRows(records: CRMRecord[], getter: (record: CRMRecord) => string,
 
   return [...grouped.entries()]
     .map(([name, group]) => {
-      const leads = group.length;
-      const relevantStrict = group.filter(isRelevantStrict).length;
-      const qualifiedActive = group.filter(isQualifiedActive).length;
-      const rejected = group.filter(isRejected).length;
-      const agreementSent = group.filter(hasAgreementSent).length;
-      const agreementSigned = group.filter(hasAgreementSigned).length;
-      const clients = group.filter(isClient).length;
-      const fullPaidClients = group.filter(isFullPaidClient).length;
       const marketingSpend = getter === sourceGetter ? sumFinanceSourceSpend(finance, name) : 0;
-      return {
-        name,
-        leads,
-        share: pct(leads, total),
-        relevantStrict,
-        relevantStrictRate: pct(relevantStrict, leads),
-        qualifiedActive,
-        qualifiedActiveRate: pct(qualifiedActive, leads),
-        rejected,
-        rejectionRate: pct(rejected, leads),
-        agreementSent,
-        agreementSentRate: pct(agreementSent, leads),
-        agreementSigned,
-        agreementSignedRate: pct(agreementSigned, leads),
-        clients,
-        clientRate: pct(clients, leads),
-        fullPaidClients,
-        fullPaidClientRate: pct(fullPaidClients, leads),
-        marketingSpend,
-        cpl: ratio(marketingSpend, leads),
-        cpql: ratio(marketingSpend, qualifiedActive),
-        cac: ratio(marketingSpend, clients),
-        roas: null,
-      };
+      return metricSummary(name, group, total, marketingSpend);
     })
     .sort((a, b) => b.leads - a.leads)
     .slice(0, limit);
@@ -263,8 +306,70 @@ function sourceGetter(record: CRMRecord): string {
   return record.source;
 }
 
-function serviceGetter(record: CRMRecord): string {
-  return record.analyticsService;
+function allocatedServiceSpend(records: CRMRecord[], finance?: FinanceData): Map<string, number> {
+  const spendBySource = sourceSpendMap(finance);
+  const sourceGroups = new Map<string, CRMRecord[]>();
+  for (const record of records) {
+    sourceGroups.set(record.source, [...(sourceGroups.get(record.source) ?? []), record]);
+  }
+
+  const serviceSpend = new Map<string, number>();
+  for (const [source, sourceRecords] of sourceGroups.entries()) {
+    const sourceSpend = spendBySource.get(source) ?? 0;
+    if (!sourceSpend || !sourceRecords.length) continue;
+    const byService = new Map<string, number>();
+    for (const record of sourceRecords) {
+      byService.set(record.reportingService, (byService.get(record.reportingService) ?? 0) + 1);
+    }
+    for (const [service, leads] of byService.entries()) {
+      const allocated = sourceSpend * (leads / sourceRecords.length);
+      serviceSpend.set(service, (serviceSpend.get(service) ?? 0) + allocated);
+    }
+  }
+  return serviceSpend;
+}
+
+function servicePerformanceRows(records: CRMRecord[], finance?: FinanceData): BucketRow[] {
+  const grouped = new Map<string, CRMRecord[]>();
+  for (const record of records) {
+    grouped.set(record.reportingService, [...(grouped.get(record.reportingService) ?? []), record]);
+  }
+  const spend = allocatedServiceSpend(records, finance);
+  return [...grouped.entries()]
+    .map(([service, group]) => metricSummary(service, group, records.length, spend.get(service) ?? 0))
+    .sort((a, b) => b.leads - a.leads);
+}
+
+function serviceChannelRows(records: CRMRecord[], finance?: FinanceData): ServiceChannelRow[] {
+  const grouped = new Map<string, CRMRecord[]>();
+  const sourceGroups = new Map<string, CRMRecord[]>();
+  const spendBySource = sourceSpendMap(finance);
+
+  for (const record of records) {
+    const key = `${record.reportingService}|||${record.source}`;
+    grouped.set(key, [...(grouped.get(key) ?? []), record]);
+    sourceGroups.set(record.source, [...(sourceGroups.get(record.source) ?? []), record]);
+  }
+
+  return [...grouped.entries()]
+    .map(([key, group]) => {
+      const [service, source] = key.split("|||");
+      const sourceRecords = sourceGroups.get(source) ?? [];
+      const sourceSpend = spendBySource.get(source) ?? 0;
+      const marketingSpend = sourceSpend && sourceRecords.length ? sourceSpend * (group.length / sourceRecords.length) : 0;
+      const summary = metricSummary(`${service} / ${source}`, group, records.length, marketingSpend);
+      const spendAllocation: ServiceChannelRow["spendAllocation"] = sourceSpend ? "estimated_by_lead_share" : "none";
+      return {
+        ...summary,
+        service,
+        source,
+        spendAllocation,
+        attributionNote: sourceSpend
+          ? "Spend is estimated: channel finance cost allocated to service by lead share inside that channel."
+          : "No matching finance spend for this channel in the selected period.",
+      };
+    })
+    .sort((a, b) => a.service.localeCompare(b.service) || b.leads - a.leads);
 }
 
 function financeMonthlyMap(finance?: FinanceData): Map<string, { revenue: number; marketingSpend: number; profitAfterMarketing: number; signedContracts: number }> {
@@ -338,7 +443,7 @@ function monthlyRows(records: CRMRecord[], finance?: FinanceData): MonthlyRow[] 
 function fieldCoverage(records: CRMRecord[]): FieldCoverageRow[] {
   const fields: [FieldCoverageRow["group"], string, (record: CRMRecord) => unknown][] = [
     ["Used directly in analytics", "Relevant", (r) => r.relevant],
-    ["Used directly in analytics", "Service dimension", (r) => r.analyticsService !== "Unknown" && r.analyticsService],
+    ["Used directly in analytics", "Service dimension", (r) => r.reportingService !== "Other / Unknown" && r.reportingService],
     ["Used directly in analytics", "Country", (r) => r.country !== "Unknown" && r.country],
     ["Used directly in analytics", "Normalized source", (r) => r.source !== "Unknown" && r.source],
     ["Used directly in analytics", "Google Client ID", (r) => r.googleClientId],
@@ -410,10 +515,49 @@ function cohortRows(records: CRMRecord[]): CohortRow[] {
     });
 }
 
+function serviceCohortRows(records: CRMRecord[]): ServiceCohortRow[] {
+  const grouped = new Map<string, CRMRecord[]>();
+  for (const record of records) {
+    const cohort = monthKey(record.createdAt);
+    if (cohort === "Unknown") continue;
+    const key = `${record.reportingService}|||${cohort}`;
+    grouped.set(key, [...(grouped.get(key) ?? []), record]);
+  }
+
+  return [...grouped.entries()]
+    .map(([key, group]) => {
+      const [service, cohort] = key.split("|||");
+      const leads = group.length;
+      const clients = group.filter(isClient);
+      const paidWithDate = clients.filter((record) => record.createdAt && record.firstPaymentAt);
+      const paidDateUnknown = clients.filter((record) => !record.firstPaymentAt).length;
+      const byMonth = [0, 1, 2, 3].map((age) => {
+        const count = paidWithDate.filter((record) => record.createdAt && record.firstPaymentAt && monthDiff(record.createdAt, record.firstPaymentAt) <= age).length;
+        return pct(count, leads);
+      });
+
+      return {
+        service,
+        cohort,
+        label: monthLabel(cohort),
+        leads,
+        currentPaidRate: pct(clients.length, leads),
+        m0: byMonth[0],
+        m1: byMonth[1],
+        m2: byMonth[2],
+        m3: byMonth[3],
+        paidDateUnknownRate: pct(paidDateUnknown, leads),
+      };
+    })
+    .filter((row) => row.leads >= 3)
+    .sort((a, b) => b.cohort.localeCompare(a.cohort) || a.service.localeCompare(b.service))
+    .slice(0, 24);
+}
+
 function sourceServiceMatrix(records: CRMRecord[]) {
   const grouped = new Map<string, CRMRecord[]>();
   for (const record of records) {
-    const key = `${record.source}|||${record.analyticsService}`;
+    const key = `${record.source}|||${record.reportingService}`;
     grouped.set(key, [...(grouped.get(key) ?? []), record]);
   }
 
@@ -424,6 +568,8 @@ function sourceServiceMatrix(records: CRMRecord[]) {
         source,
         service,
         leads: group.length,
+        clients: group.filter(isClient).length,
+        fullPaidClients: group.filter(isFullPaidClient).length,
         clientRate: pct(group.filter(isClient).length, group.length),
       };
     })
@@ -495,6 +641,60 @@ function financeSummary(finance: FinanceData | undefined, leads: number, qualifi
   };
 }
 
+function attributionWarnings(records: CRMRecord[], finance?: FinanceData): string[] {
+  const sourceMethods = countBy(records, (record) => record.sourceMethod);
+  const legacyOrUnknown = (sourceMethods.get("legacy_name") ?? 0) + (sourceMethods.get("unknown") ?? 0);
+  const warnings = [
+    "Channel CAC is based on normalized CRM source and finance channel spend. It is preliminary and subject to attribution completeness.",
+    "Service-level spend and CAC are estimated by allocating channel spend across services by lead share, because the finance report does not contain service-level spend.",
+  ];
+  if (pct(legacyOrUnknown, records.length) > 0.2) {
+    warnings.push("More than 20% of source attribution uses legacy/unknown source logic, so source CAC may be overstated or understated.");
+  }
+  if (pct(records.filter((record) => record.reportingService === "Other / Unknown").length, records.length) > 0.2) {
+    warnings.push("More than 20% of leads are mapped to Other / Unknown service, so service-level conclusions need CRM service field cleanup.");
+  }
+  if ((finance?.channelCosts.length ?? 0) === 0) {
+    warnings.push("No finance channel costs are available in the selected period, so CPL/CAC by channel and service are unavailable.");
+  }
+  return warnings;
+}
+
+function decisionInsights(rows: ServiceChannelRow[]): DecisionInsight[] {
+  const paidRows = rows.filter((row) => row.marketingSpend > 0 && row.leads >= 3);
+  const candidates = paidRows
+    .filter((row) => row.clients > 0 && row.cac !== null)
+    .sort((a, b) => (a.cac ?? Number.POSITIVE_INFINITY) - (b.cac ?? Number.POSITIVE_INFINITY))
+    .slice(0, 2)
+    .map((row) => ({
+      title: `${row.source} / ${row.service}`,
+      detail: `${row.clients} clients from ${row.leads} leads. Estimated CAC ${formatCurrency(row.cac)}.`,
+      tone: "green" as const,
+    }));
+
+  const controlledTests = paidRows
+    .filter((row) => row.clients === 0)
+    .sort((a, b) => b.marketingSpend - a.marketingSpend)
+    .slice(0, 2)
+    .map((row) => ({
+      title: `${row.source} / ${row.service}`,
+      detail: `${formatCurrency(row.marketingSpend)} spend and ${row.leads} leads, but no clients yet. Keep as controlled test until attribution or conversion improves.`,
+      tone: "amber" as const,
+    }));
+
+  const organicOrPartner = rows
+    .filter((row) => row.marketingSpend === 0 && row.clients > 0 && ["Partner", "Organic Search", "Direct", "Calendly"].includes(row.source))
+    .sort((a, b) => b.clients - a.clients)
+    .slice(0, 2)
+    .map((row) => ({
+      title: `${row.source} / ${row.service}`,
+      detail: `${row.clients} clients with no matched paid spend. Check whether this is true organic/partner performance or source capture drift.`,
+      tone: "blue" as const,
+    }));
+
+  return [...candidates, ...controlledTests, ...organicOrPartner].slice(0, 5);
+}
+
 export function buildAnalytics(records: CRMRecord[], finance?: FinanceData): Analytics {
   const sortedDates = records
     .map((record) => record.createdAt)
@@ -512,6 +712,8 @@ export function buildAnalytics(records: CRMRecord[], finance?: FinanceData): Ana
   const duplicates = records.filter(isDuplicate).length;
   const coverage = fieldCoverage(records);
   const implementedFields = coverage.filter((field) => field.rate > 0).length;
+  const serviceRows = servicePerformanceRows(records, finance);
+  const serviceChannelPerformance = serviceChannelRows(records, finance);
 
   return {
     total,
@@ -540,7 +742,11 @@ export function buildAnalytics(records: CRMRecord[], finance?: FinanceData): Ana
     ],
     monthly: monthlyRows(records, finance),
     sourceRows: bucketRows(records, sourceGetter, 12, finance),
-    serviceRows: bucketRows(records, serviceGetter, 12),
+    serviceRows,
+    servicePerformanceRows: serviceRows,
+    serviceChannelRows: serviceChannelPerformance,
+    decisionInsights: decisionInsights(serviceChannelPerformance),
+    attributionWarnings: attributionWarnings(records, finance),
     statusRows: topRows(countBy(records, (record) => record.status || "Unknown"), total, 12),
     rejectionRows: topRows(
       countBy(
@@ -552,6 +758,7 @@ export function buildAnalytics(records: CRMRecord[], finance?: FinanceData): Ana
     ),
     fieldCoverage: coverage,
     cohorts: cohortRows(records),
+    serviceCohorts: serviceCohortRows(records),
     topCountries: topRows(countBy(records, (record) => record.country || "Unknown"), total, 12),
     sourceServiceMatrix: sourceServiceMatrix(records),
     sourceMonthlyConversion: sourceMonthlyConversion(records, finance),

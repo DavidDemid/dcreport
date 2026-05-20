@@ -80,3 +80,33 @@ select {
 .pdf-export * {
   text-shadow: none !important;
 }
+
+.export-report {
+  position: absolute;
+  left: -10000px;
+  top: 0;
+  width: 1180px;
+  background: #f7f8fa;
+  padding: 24px;
+}
+
+.export-page {
+  background: #f7f8fa;
+  padding: 0 0 24px;
+}
+
+.export-page-title {
+  margin-bottom: 16px;
+  color: #0f172a;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.export-page-content > div {
+  width: 100%;
+}
+
+.export-report .export-page + .export-page {
+  margin-top: 24px;
+}

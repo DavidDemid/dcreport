@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -43,6 +44,10 @@ const tabs: { id: Tab; label: string; icon: typeof BarChart3 }[] = [
   { id: "quality", label: "Quality", icon: CheckCircle2 },
 ];
 
+const DB_NAME = "dc-crm-analytics";
+const DB_VERSION = 1;
+const FILE_STORE = "files";
+
 const panelHelp: Record<string, string> = {
   "Monthly trend": "Shows how lead volume, active-qualified leads, rejected leads, and clients changed by lead creation month.",
   "Pipeline status distribution": "Counts CRM rows by current status, so you can see where the pipeline is concentrated right now.",
@@ -52,8 +57,12 @@ const panelHelp: Record<string, string> = {
   "Lead acquisition by channel": "Counts leads by normalized source: first-touch source, UTM source, parsed UTM tag, then legacy source name.",
   "Lead acquisition by service": "Counts leads by service dimension: qualified service, original service interest, then Service group fallback.",
   "Source report": "Channel table with volume, conversion rates, spend, CPL, and CAC where finance spend can be matched.",
+  "Decision flags": "Highlights channel-service combinations that may be scale candidates, controlled tests, or attribution checks.",
+  "Attribution and CAC limitations": "Explains where CAC is preliminary because CRM source and finance spend do not fully match end to end.",
   "Marketing efficiency by channel": "Shows spend, cost per lead, and cost per client for channels that have finance costs.",
   "Service report": "Service table with lead volume and conversion rates. Spend is not split by service because finance data is channel-based.",
+  "Service-level performance": "Performance by normalized product/service. Spend is estimated by allocating channel spend across services by lead share.",
+  "Channel performance by service": "Breaks each product/service down by channel with lead, client, full-paid counts and estimated cost metrics.",
   "Channel and service combinations": "Largest source-service pairs, useful for seeing which channel drives which service.",
   "Monthly conversion trend": "Shows month-by-month conversion rates from lead to relevant, active, agreement, client, and full-paid client.",
   "Monthly conversion by channel": "Same conversion trend, but only for the selected marketing channel.",
@@ -61,6 +70,7 @@ const panelHelp: Record<string, string> = {
   "Conversion by channel": "Compares channel volume and conversion quality side by side.",
   "Conversion by service": "Compares service volume and conversion quality side by side.",
   "Monthly cohorts": "Groups leads by creation month and tracks payment timing using real first_payment_at dates only.",
+  "Service cohort snapshot": "Recent monthly cohorts split by normalized product/service, so cohort quality is not hidden by the total average.",
   "Cohort conversion trend": "Compares cohort quality: active-qualified rate, current paid proxy, paid with date by M5, and rejected rate.",
   "Field completeness": "Shows how often important CRM fields are filled and whether metrics still depend on status proxies.",
 };
@@ -133,6 +143,47 @@ function reportFileDate(value: string, fallback: string): string {
   return value || fallback;
 }
 
+function fileSlug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function openReportsDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(FILE_STORE)) {
+        db.createObjectStore(FILE_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveReportFile(key: "crm" | "finance", name: string, buffer: ArrayBuffer) {
+  const db = await openReportsDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(FILE_STORE, "readwrite");
+    tx.objectStore(FILE_STORE).put({ name, buffer, savedAt: Date.now() }, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+async function loadReportFile(key: "crm" | "finance"): Promise<{ name: string; buffer: ArrayBuffer } | null> {
+  const db = await openReportsDb();
+  const result = await new Promise<{ name: string; buffer: ArrayBuffer } | null>((resolve, reject) => {
+    const tx = db.transaction(FILE_STORE, "readonly");
+    const request = tx.objectStore(FILE_STORE).get(key);
+    request.onsuccess = () => resolve(request.result ?? null);
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+  return result;
+}
+
 function EmptyState() {
   return (
     <main className="flex min-h-screen items-center justify-center bg-[#f7f8fa] p-6">
@@ -186,7 +237,6 @@ function KpiCard({
 function InfoHint({ text }: { text: string }) {
   return (
     <span
-      data-html2canvas-ignore="true"
       title={text}
       className="pdf-ignore inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-500"
     >
@@ -223,7 +273,7 @@ function Panel({
           <h2 className="text-base font-semibold text-slate-950">{title}</h2>
           {helpText ? <InfoHint text={helpText} /> : null}
         </div>
-        {action}
+        {action ? <div className="pdf-ignore">{action}</div> : null}
       </div>
       {children}
     </section>
@@ -357,29 +407,33 @@ function Overview({ analytics }: { analytics: Analytics }) {
 function BucketTable({ rows, kind }: { rows: Analytics["sourceRows"]; kind: "source" | "service" }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[760px] text-sm">
+      <table className="w-full min-w-[1280px] text-sm">
         <thead>
-          <tr className="border-b border-slate-200 text-left text-xs uppercase text-slate-500">
+          <tr className="border-b border-slate-200 text-left text-xs uppercase text-slate-500 [&>th]:whitespace-nowrap">
             <th className="py-3 pr-4">{kind === "source" ? "Channel" : "Service"}</th>
             <th className="py-3 pr-4 text-right">Leads</th>
+            <th className="py-3 pr-4 text-right">Clients</th>
+            <th className="py-3 pr-4 text-right">Full paid</th>
             <th className="py-3 pr-4 text-right">Share</th>
             <th className="py-3 pr-4 text-right">Relevant</th>
             <th className="py-3 pr-4 text-right">Qualified / Active</th>
             <th className="py-3 pr-4 text-right">Rejected</th>
             <th className="py-3 pr-4 text-right">Agr. sent</th>
             <th className="py-3 pr-4 text-right">Agr. signed</th>
-            <th className="py-3 pr-4 text-right">Client</th>
-            <th className="py-3 text-right">Full paid</th>
-            {kind === "source" ? <th className="py-3 pl-4 text-right">Spend</th> : null}
-            {kind === "source" ? <th className="py-3 pl-4 text-right">CPL</th> : null}
-            {kind === "source" ? <th className="py-3 pl-4 text-right">CAC</th> : null}
+            <th className="py-3 pr-4 text-right">Client rate</th>
+            <th className="py-3 text-right">Full paid rate</th>
+            <th className="py-3 pl-4 text-right">Spend</th>
+            <th className="py-3 pl-4 text-right">CPL</th>
+            <th className="py-3 pl-4 text-right">CAC</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.name} className="border-b border-slate-100">
-              <td className="max-w-[260px] truncate py-3 pr-4 font-medium text-slate-950">{row.name}</td>
+              <td className="max-w-[280px] py-3 pr-4 font-medium leading-snug text-slate-950">{row.name}</td>
               <td className="py-3 pr-4 text-right">{formatNumber(row.leads)}</td>
+              <td className="py-3 pr-4 text-right font-medium text-slate-950">{formatNumber(row.clients)}</td>
+              <td className="py-3 pr-4 text-right font-medium text-slate-950">{formatNumber(row.fullPaidClients)}</td>
               <td className="py-3 pr-4 text-right">{formatPercent(row.share)}</td>
               <td className="py-3 pr-4 text-right">{formatPercent(row.relevantStrictRate)}</td>
               <td className="py-3 pr-4 text-right">{formatPercent(row.qualifiedActiveRate)}</td>
@@ -388,9 +442,56 @@ function BucketTable({ rows, kind }: { rows: Analytics["sourceRows"]; kind: "sou
               <td className="py-3 pr-4 text-right">{formatPercent(row.agreementSignedRate)}</td>
               <td className="py-3 pr-4 text-right">{formatPercent(row.clientRate)}</td>
               <td className="py-3 text-right">{formatPercent(row.fullPaidClientRate)}</td>
-              {kind === "source" ? <td className="py-3 pl-4 text-right">{formatCurrency(row.marketingSpend)}</td> : null}
-              {kind === "source" ? <td className="py-3 pl-4 text-right">{formatCurrency(row.cpl)}</td> : null}
-              {kind === "source" ? <td className="py-3 pl-4 text-right">{formatCurrency(row.cac)}</td> : null}
+              <td className="py-3 pl-4 text-right">{formatCurrency(row.marketingSpend)}</td>
+              <td className="py-3 pl-4 text-right">{formatCurrency(row.cpl)}</td>
+              <td className="py-3 pl-4 text-right">{formatCurrency(row.cac)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ServiceChannelTable({ rows }: { rows: Analytics["serviceChannelRows"] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[1260px] text-sm">
+        <thead>
+          <tr className="border-b border-slate-200 text-left text-xs uppercase text-slate-500 [&>th]:whitespace-nowrap">
+            <th className="py-3 pr-4">Service</th>
+            <th className="py-3 pr-4">Channel</th>
+            <th className="py-3 pr-4 text-right">Leads</th>
+            <th className="py-3 pr-4 text-right">Clients</th>
+            <th className="py-3 pr-4 text-right">Full paid</th>
+            <th className="py-3 pr-4 text-right">Relevant</th>
+            <th className="py-3 pr-4 text-right">Qualified</th>
+            <th className="py-3 pr-4 text-right">Rejected</th>
+            <th className="py-3 pr-4 text-right">Agr. sent</th>
+            <th className="py-3 pr-4 text-right">Agr. signed</th>
+            <th className="py-3 pr-4 text-right">Spend</th>
+            <th className="py-3 pr-4 text-right">CPL</th>
+            <th className="py-3 text-right">CAC</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={`${row.service}-${row.source}`} className="border-b border-slate-100">
+              <td className="max-w-[260px] py-3 pr-4 font-medium leading-snug text-slate-950">{row.service}</td>
+              <td className="max-w-[180px] py-3 pr-4 leading-snug text-slate-700">{row.source}</td>
+              <td className="py-3 pr-4 text-right">{formatNumber(row.leads)}</td>
+              <td className="py-3 pr-4 text-right font-medium text-slate-950">{formatNumber(row.clients)}</td>
+              <td className="py-3 pr-4 text-right font-medium text-slate-950">{formatNumber(row.fullPaidClients)}</td>
+              <td className="py-3 pr-4 text-right">{formatPercent(row.relevantStrictRate)}</td>
+              <td className="py-3 pr-4 text-right">{formatPercent(row.qualifiedActiveRate)}</td>
+              <td className="py-3 pr-4 text-right">{formatPercent(row.rejectionRate)}</td>
+              <td className="py-3 pr-4 text-right">{formatPercent(row.agreementSentRate)}</td>
+              <td className="py-3 pr-4 text-right">{formatPercent(row.agreementSignedRate)}</td>
+              <td className="py-3 pr-4 text-right">
+                <span title={row.attributionNote}>{formatCurrency(row.marketingSpend)}</span>
+              </td>
+              <td className="py-3 pr-4 text-right">{formatCurrency(row.cpl)}</td>
+              <td className="py-3 text-right">{formatCurrency(row.cac)}</td>
             </tr>
           ))}
         </tbody>
@@ -402,14 +503,44 @@ function BucketTable({ rows, kind }: { rows: Analytics["sourceRows"]; kind: "sou
 function Sources({ analytics }: { analytics: Analytics }) {
   return (
     <div className="space-y-5">
+      <Panel title="Decision flags">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {analytics.decisionInsights.map((item) => (
+            <div
+              key={`${item.title}-${item.detail}`}
+              className={clsx(
+                "rounded-lg border p-4",
+                item.tone === "green" && "border-emerald-200 bg-emerald-50",
+                item.tone === "amber" && "border-amber-200 bg-amber-50",
+                item.tone === "red" && "border-rose-200 bg-rose-50",
+                item.tone === "blue" && "border-blue-200 bg-blue-50",
+              )}
+            >
+              <div className="text-sm font-semibold text-slate-950">{item.title}</div>
+              <div className="mt-2 text-sm leading-5 text-slate-700">{item.detail}</div>
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel title="Attribution and CAC limitations">
+        <div className="space-y-2 text-sm leading-6 text-slate-700">
+          {analytics.attributionWarnings.map((warning) => (
+            <div key={warning} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              {warning}
+            </div>
+          ))}
+        </div>
+      </Panel>
+
       <div className="grid gap-5 xl:grid-cols-2">
         <Panel title="Lead acquisition by channel">
           <div className="h-[340px]">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={analytics.sourceRows.slice(0, 8)} layout="vertical" margin={{ left: 24 }}>
+              <BarChart data={analytics.sourceRows.slice(0, 8)} layout="vertical" margin={{ left: 12, right: 12 }}>
                 <CartesianGrid stroke="#e2e8f0" horizontal={false} />
                 <XAxis type="number" tick={{ fontSize: 12 }} />
-                <YAxis dataKey="name" type="category" width={120} tick={{ fontSize: 12 }} />
+                <YAxis dataKey="name" type="category" width={150} tick={{ fontSize: 12 }} />
                 <Tooltip />
                 <Bar isAnimationActive={false} dataKey="leads" fill="#2563eb" radius={[0, 3, 3, 0]} />
               </BarChart>
@@ -418,12 +549,12 @@ function Sources({ analytics }: { analytics: Analytics }) {
         </Panel>
 
         <Panel title="Lead acquisition by service">
-          <div className="h-[340px]">
+          <div style={{ height: Math.max(340, analytics.serviceRows.length * 58) }}>
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={analytics.serviceRows.slice(0, 8)} layout="vertical" margin={{ left: 24 }}>
+              <BarChart data={analytics.serviceRows} layout="vertical" margin={{ left: 12, right: 12 }}>
                 <CartesianGrid stroke="#e2e8f0" horizontal={false} />
                 <XAxis type="number" tick={{ fontSize: 12 }} />
-                <YAxis dataKey="name" type="category" width={120} tick={{ fontSize: 12 }} />
+                <YAxis dataKey="name" type="category" width={230} tick={{ fontSize: 12 }} />
                 <Tooltip />
                 <Bar isAnimationActive={false} dataKey="leads" fill="#16a34a" radius={[0, 3, 3, 0]} />
               </BarChart>
@@ -436,35 +567,57 @@ function Sources({ analytics }: { analytics: Analytics }) {
         <BucketTable rows={analytics.sourceRows} kind="source" />
       </Panel>
 
+      <Panel title="Service-level performance">
+        <BucketTable rows={analytics.servicePerformanceRows} kind="service" />
+      </Panel>
+
+      <Panel title="Channel performance by service">
+        <ServiceChannelTable rows={analytics.serviceChannelRows} />
+      </Panel>
+
       <Panel title="Marketing efficiency by channel">
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {analytics.sourceRows
             .filter((row) => row.marketingSpend > 0)
             .slice(0, 8)
             .map((row) => (
-              <div key={row.name} className="rounded-lg border border-slate-200 p-4">
-                <div className="truncate text-sm font-semibold text-slate-950">{row.name}</div>
-                <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
-                  <div>
-                    <div className="flex items-center gap-1 text-xs text-slate-500">Spend <InfoHint text="Finance marketing cost matched to this normalized channel." /></div>
+              <div key={row.name} className="rounded-lg border border-slate-200 bg-white p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="break-words text-sm font-semibold leading-snug text-slate-950">{row.name}</div>
+                    <div className="mt-1 text-xs text-slate-500">Preliminary attribution</div>
+                  </div>
+                  <InfoHint text="Spend comes from the finance report by channel. CAC is preliminary because CRM source attribution can differ from original acquisition source." />
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+                  <div className="min-w-0">
+                    <div className="text-xs text-slate-500">Leads</div>
+                    <div className="font-semibold text-slate-950">{formatNumber(row.leads)}</div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs text-slate-500">Clients</div>
+                    <div className="font-semibold text-slate-950">{formatNumber(row.clients)}</div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs text-slate-500">Spend</div>
                     <div className="font-semibold text-slate-950">{formatCurrency(row.marketingSpend)}</div>
                   </div>
-                  <div>
-                    <div className="flex items-center gap-1 text-xs text-slate-500">CPL <InfoHint text="Channel spend divided by leads from this channel." /></div>
+                  <div className="min-w-0">
+                    <div className="text-xs text-slate-500">CPL</div>
                     <div className="font-semibold text-slate-950">{formatCurrency(row.cpl)}</div>
                   </div>
-                  <div>
-                    <div className="flex items-center gap-1 text-xs text-slate-500">CAC <InfoHint text="Channel spend divided by first-payment clients from this channel." /></div>
+                  <div className="min-w-0">
+                    <div className="text-xs text-slate-500">CAC</div>
                     <div className="font-semibold text-slate-950">{formatCurrency(row.cac)}</div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs text-slate-500">Full paid</div>
+                    <div className="font-semibold text-slate-950">{formatNumber(row.fullPaidClients)}</div>
                   </div>
                 </div>
               </div>
             ))}
         </div>
-      </Panel>
-
-      <Panel title="Service report">
-        <BucketTable rows={analytics.serviceRows} kind="service" />
       </Panel>
 
       <Panel title="Channel and service combinations">
@@ -475,7 +628,11 @@ function Sources({ analytics }: { analytics: Analytics }) {
               <div className="mt-1 truncate text-xs text-slate-500">{row.service}</div>
               <div className="mt-4 flex items-end justify-between gap-3">
                 <span className="text-2xl font-semibold text-slate-950">{formatNumber(row.leads)}</span>
-                <span className="text-sm font-medium text-amber-700">{formatPercent(row.clientRate)}</span>
+                <span className="text-right text-sm font-medium text-amber-700">
+                  {formatNumber(row.clients)} clients
+                  <br />
+                  {formatNumber(row.fullPaidClients)} full paid
+                </span>
               </div>
             </div>
           ))}
@@ -727,6 +884,41 @@ function Cohorts({ analytics }: { analytics: Analytics }) {
         </div>
       </Panel>
 
+      <Panel title="Service cohort snapshot" help="Recent cohort rows split by normalized service. M0-M3 use real first_payment_at only; paid date unknown is kept separate.">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[860px] text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 text-left text-xs uppercase text-slate-500">
+                <th className="py-3 pr-4">Cohort</th>
+                <th className="py-3 pr-4">Service</th>
+                <th className="py-3 pr-4 text-right">Leads</th>
+                <th className="py-3 pr-4 text-right">Current paid</th>
+                <th className="py-3 pr-4 text-right">M0</th>
+                <th className="py-3 pr-4 text-right">M1</th>
+                <th className="py-3 pr-4 text-right">M2</th>
+                <th className="py-3 pr-4 text-right">M3</th>
+                <th className="py-3 text-right">Paid date unknown</th>
+              </tr>
+            </thead>
+            <tbody>
+              {analytics.serviceCohorts.map((row) => (
+                <tr key={`${row.service}-${row.cohort}`} className="border-b border-slate-100">
+                  <td className="py-3 pr-4 font-medium text-slate-950">{row.label}</td>
+                  <td className="max-w-[260px] truncate py-3 pr-4 text-slate-700">{row.service}</td>
+                  <td className="py-3 pr-4 text-right">{formatNumber(row.leads)}</td>
+                  <td className="py-3 pr-4 text-right">{formatPercent(row.currentPaidRate)}</td>
+                  <td className="py-3 pr-4 text-right">{formatPercent(row.m0)}</td>
+                  <td className="py-3 pr-4 text-right">{formatPercent(row.m1)}</td>
+                  <td className="py-3 pr-4 text-right">{formatPercent(row.m2)}</td>
+                  <td className="py-3 pr-4 text-right">{formatPercent(row.m3)}</td>
+                  <td className="py-3 text-right">{formatPercent(row.paidDateUnknownRate)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
       <Panel title="Cohort conversion trend">
         <div className="h-[360px]">
           <ResponsiveContainer width="100%" height="100%">
@@ -797,6 +989,15 @@ function Quality({ analytics }: { analytics: Analytics }) {
   );
 }
 
+function ReportPage({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="export-page">
+      <div className="export-page-title">{title}</div>
+      <div className="export-page-content">{children}</div>
+    </section>
+  );
+}
+
 export default function Home() {
   const [records, setRecords] = useState<CRMRecord[]>([]);
   const [financeData, setFinanceData] = useState<FinanceData | null>(null);
@@ -808,26 +1009,39 @@ export default function Home() {
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
   const [uniqueOnly, setUniqueOnly] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportMode, setExportMode] = useState<"none" | "current" | "all">("none");
   const inputRef = useRef<HTMLInputElement>(null);
   const financeInputRef = useRef<HTMLInputElement>(null);
-  const reportRef = useRef<HTMLElement>(null);
+  const exportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let mounted = true;
 
     async function loadSample() {
       try {
-        const response = await fetch("/sample-crm-export.xlsx");
-        if (!response.ok) throw new Error("Sample CRM XLSX was not found");
-        const buffer = await response.arrayBuffer();
-        const parsed = await parseWorkbook(buffer);
-        const financeResponse = await fetch("/sample-finance-report.xlsx");
-        const parsedFinance = financeResponse.ok
-          ? await parseFinanceWorkbook(await financeResponse.arrayBuffer())
-          : null;
+        const savedCrm = await loadReportFile("crm").catch(() => null);
+        const savedFinance = await loadReportFile("finance").catch(() => null);
+        let crmBuffer: ArrayBuffer;
+        if (savedCrm?.buffer) {
+          crmBuffer = savedCrm.buffer;
+        } else {
+          crmBuffer = await fetch("/sample-crm-export.xlsx").then((response) => {
+            if (!response.ok) throw new Error("Sample CRM XLSX was not found");
+            return response.arrayBuffer();
+          });
+        }
+        const parsed = await parseWorkbook(crmBuffer);
+        const financeBuffer: ArrayBuffer | null = savedFinance?.buffer
+          ? savedFinance.buffer
+          : await fetch("/sample-finance-report.xlsx").then((response) => (
+            response.ok ? response.arrayBuffer() : null
+          ));
+        const parsedFinance = financeBuffer ? await parseFinanceWorkbook(financeBuffer) : null;
         if (mounted) {
           setRecords(parsed);
           setFinanceData(parsedFinance);
+          if (savedCrm) setFileName(savedCrm.name);
+          if (savedFinance) setFinanceFileName(savedFinance.name);
           setDateRange(getDateBounds(parsed));
         }
       } catch (loadError) {
@@ -863,6 +1077,7 @@ export default function Home() {
   );
 
   const analytics = useMemo(() => buildAnalytics(filteredRecords, filteredFinance), [filteredFinance, filteredRecords]);
+  const activeTab = tabs.find((item) => item.id === tab) ?? tabs[0];
 
   async function handleFile(file: File) {
     setError("");
@@ -873,6 +1088,7 @@ export default function Home() {
       setRecords(parsed);
       setDateRange(getDateBounds(parsed));
       setFileName(file.name);
+      await saveReportFile("crm", file.name, buffer.slice(0));
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Could not parse the selected XLSX file");
     } finally {
@@ -888,6 +1104,7 @@ export default function Home() {
       const parsed = await parseFinanceWorkbook(buffer);
       setFinanceData(parsed);
       setFinanceFileName(file.name);
+      await saveReportFile("finance", file.name, buffer.slice(0));
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Could not parse the selected finance XLSX file");
     } finally {
@@ -895,120 +1112,136 @@ export default function Home() {
     }
   }
 
-  async function exportPdf() {
-    if (!reportRef.current || isExporting) return;
+  async function exportPdf(mode: "current" | "all") {
+    if (isExporting) return;
     setIsExporting(true);
     setError("");
-    const originalTab = tab;
+    const bounds = getDateBounds(records);
+    const from = reportFileDate(dateRange.from, bounds.from || "start");
+    const to = reportFileDate(dateRange.to, bounds.to || "end");
+    const scope = mode === "all" ? "full-report" : activeTab.label;
+    const filename = `dc-crm-analytics-${fileSlug(scope)}_${from}_to_${to}`;
 
     try {
+      setExportMode(mode);
       document.body.classList.add("pdf-export");
-      const [{ default: html2canvas }, { default: jsPDF }] = await Promise.all([
-        import("html2canvas"),
+      await nextFrame();
+      await document.fonts?.ready;
+      await wait(1200);
+
+      const [{ toPng }, { default: jsPDF }] = await Promise.all([
+        import("html-to-image"),
         import("jspdf"),
       ]);
+
       const pdf = new jsPDF("p", "mm", "a4");
       const pageWidth = pdf.internal.pageSize.getWidth();
       const pageHeight = pdf.internal.pageSize.getHeight();
       const margin = 8;
-      const headerHeight = 9;
-      const pageContentWidth = pageWidth - margin * 2;
-      const pageContentHeight = pageHeight - margin * 2 - headerHeight;
+      const contentWidth = pageWidth - margin * 2;
+      const contentHeight = pageHeight - margin * 2;
       let firstPage = true;
 
-      function addPageHeader(title: string) {
-        pdf.setFontSize(13);
-        pdf.setTextColor(15, 23, 42);
-        pdf.text(title, margin, 8);
-      }
+      const root = exportRef.current;
+      if (!root) throw new Error("Report content is not ready for export");
+      const pages = Array.from(root.querySelectorAll<HTMLElement>(".export-page"));
 
-      function addCanvasToPdf(canvas: HTMLCanvasElement, title: string, cursorY: number) {
-        const image = canvas.toDataURL("image/png");
-        const imageWidth = pageContentWidth;
-        const imageHeight = (canvas.height * imageWidth) / canvas.width;
-
-        if (imageHeight <= pageContentHeight) {
-          if (cursorY + imageHeight > pageHeight - margin) {
-            pdf.addPage();
-            addPageHeader(`${title} continued`);
-            cursorY = margin + headerHeight;
-          }
-          pdf.addImage(image, "PNG", margin, cursorY, imageWidth, imageHeight);
-          return cursorY + imageHeight + 6;
-        }
-
-        let renderedHeight = 0;
-        while (renderedHeight < imageHeight) {
-          if (cursorY > margin + headerHeight) {
-            pdf.addPage();
-            addPageHeader(`${title} continued`);
-            cursorY = margin + headerHeight;
-          }
-          const remainingPageHeight = pageHeight - margin - cursorY;
-          const sourceY = (renderedHeight / imageHeight) * canvas.height;
-          const sourceHeight = Math.min((remainingPageHeight / imageHeight) * canvas.height, canvas.height - sourceY);
-          const slice = document.createElement("canvas");
-          slice.width = canvas.width;
-          slice.height = sourceHeight;
-          const ctx = slice.getContext("2d");
-          if (ctx) {
-            ctx.drawImage(canvas, 0, sourceY, canvas.width, sourceHeight, 0, 0, canvas.width, sourceHeight);
-          }
-          const sliceHeight = (sourceHeight * imageWidth) / canvas.width;
-          pdf.addImage(slice.toDataURL("image/png"), "PNG", margin, cursorY, imageWidth, sliceHeight);
-          renderedHeight += sliceHeight;
-          cursorY += sliceHeight;
-          if (renderedHeight < imageHeight) {
-            pdf.addPage();
-            addPageHeader(`${title} continued`);
-            cursorY = margin + headerHeight;
-          }
-        }
-        return cursorY + 6;
-      }
-
-      for (const reportTab of tabs) {
-        setTab(reportTab.id);
-        await nextFrame();
-        await document.fonts?.ready;
-        await wait(900);
-
-        const element = reportRef.current;
-        if (!element) continue;
-
+      for (const page of pages) {
         if (!firstPage) pdf.addPage();
         firstPage = false;
-        addPageHeader(reportTab.label);
-        let cursorY = margin + headerHeight;
-        const root = element.firstElementChild instanceof HTMLElement ? element.firstElementChild : element;
-        const blocks = Array.from(root.children).filter((child): child is HTMLElement => child instanceof HTMLElement);
+        const title = page.querySelector<HTMLElement>(".export-page-title")?.innerText.trim();
+        let cursorY = margin;
+        if (title) {
+          pdf.setFont("helvetica", "bold");
+          pdf.setFontSize(14);
+          pdf.setTextColor(15, 23, 42);
+          pdf.text(title, margin, cursorY + 5);
+          cursorY += 12;
+        }
+
+        const content = page.querySelector<HTMLElement>(".export-page-content");
+        const contentRoot = content?.firstElementChild instanceof HTMLElement ? content.firstElementChild : content;
+        const blocks = Array.from(contentRoot?.children ?? []).filter((child): child is HTMLElement => child instanceof HTMLElement);
+        let blocksOnCurrentPdfPage = 0;
 
         for (const block of blocks) {
-          const canvas = await html2canvas(block, {
+          const dataUrl = await toPng(block, {
             backgroundColor: "#f7f8fa",
-            scale: Math.min(window.devicePixelRatio || 2, 2),
-            useCORS: true,
-            logging: false,
-            removeContainer: true,
-            windowWidth: Math.max(document.documentElement.scrollWidth, block.scrollWidth, 1280),
-            onclone: (clonedDocument) => {
-              clonedDocument.body.classList.add("pdf-export");
-              clonedDocument.querySelectorAll(".pdf-ignore").forEach((node) => node.remove());
+            cacheBust: true,
+            pixelRatio: 2,
+            width: block.scrollWidth,
+            height: block.scrollHeight,
+            style: {
+              transform: "none",
+              transformOrigin: "top left",
             },
+            filter: (node) => !(node instanceof HTMLElement && node.classList.contains("pdf-ignore")),
           });
-          cursorY = addCanvasToPdf(canvas, reportTab.label, cursorY);
+          const image = new Image();
+          image.src = dataUrl;
+          await new Promise<void>((resolve, reject) => {
+            image.onload = () => resolve();
+            image.onerror = () => reject(new Error("Could not render PDF image"));
+          });
+
+          const imageHeight = (image.height * contentWidth) / image.width;
+          const remainingHeight = pageHeight - margin - cursorY;
+          const shouldMoveWholeBlock = imageHeight <= contentHeight && imageHeight > remainingHeight;
+          if (shouldMoveWholeBlock && blocksOnCurrentPdfPage > 0) {
+            pdf.addPage();
+            cursorY = margin;
+            blocksOnCurrentPdfPage = 0;
+          }
+
+          if (imageHeight <= contentHeight) {
+            pdf.addImage(dataUrl, "PNG", margin, cursorY, contentWidth, imageHeight);
+            cursorY += imageHeight + 5;
+            blocksOnCurrentPdfPage += 1;
+            continue;
+          }
+
+          const canvas = document.createElement("canvas");
+          const scale = image.width / contentWidth;
+          canvas.width = image.width;
+          canvas.height = Math.floor(contentHeight * scale);
+          const context = canvas.getContext("2d");
+          if (!context) throw new Error("Could not prepare PDF canvas");
+
+          let sourceY = 0;
+          while (sourceY < image.height) {
+            if (cursorY > margin && blocksOnCurrentPdfPage > 0) {
+              pdf.addPage();
+              cursorY = margin;
+              blocksOnCurrentPdfPage = 0;
+            }
+            const availableHeight = pageHeight - margin - cursorY;
+            const sliceHeightPx = Math.max(1, Math.floor(availableHeight * scale));
+            const currentSliceHeight = Math.min(sliceHeightPx, image.height - sourceY);
+            if (canvas.height !== currentSliceHeight) canvas.height = currentSliceHeight;
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            context.drawImage(image, 0, sourceY, image.width, currentSliceHeight, 0, 0, image.width, currentSliceHeight);
+            const sliceUrl = canvas.toDataURL("image/png");
+            const sliceHeightMm = currentSliceHeight / scale;
+            pdf.addImage(sliceUrl, "PNG", margin, cursorY, contentWidth, sliceHeightMm);
+            blocksOnCurrentPdfPage += 1;
+            sourceY += currentSliceHeight;
+            if (sourceY < image.height) {
+              pdf.addPage();
+              cursorY = margin;
+              blocksOnCurrentPdfPage = 0;
+            } else {
+              cursorY += sliceHeightMm + 5;
+            }
+          }
         }
       }
 
-      const bounds = getDateBounds(records);
-      const from = reportFileDate(dateRange.from, bounds.from || "start");
-      const to = reportFileDate(dateRange.to, bounds.to || "end");
-      pdf.save(`dc-crm-analytics-report_${from}_to_${to}.pdf`);
+      pdf.save(`${filename}.pdf`);
     } catch (exportError) {
       setError(exportError instanceof Error ? exportError.message : "Could not export PDF");
     } finally {
       document.body.classList.remove("pdf-export");
-      setTab(originalTab);
+      setExportMode("none");
       setIsExporting(false);
     }
   }
@@ -1134,7 +1367,7 @@ export default function Home() {
             </button>
             <button
               type="button"
-              onClick={() => void exportPdf()}
+              onClick={() => void exportPdf("all")}
               disabled={isExporting}
               className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
               title="Export all report tabs into one PDF file"
@@ -1183,13 +1416,55 @@ export default function Home() {
         </div>
       ) : null}
 
-      <section ref={reportRef} className="mx-auto max-w-7xl px-4 py-5 sm:px-6 lg:px-8">
+      <section className="screen-report mx-auto max-w-7xl px-4 py-5 sm:px-6 lg:px-8">
+        <div className="pdf-ignore mb-4 flex justify-end">
+          <button
+            type="button"
+            onClick={() => void exportPdf("current")}
+            disabled={isExporting}
+            className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            title="Export only the current report page into PDF"
+          >
+            <Download className="h-4 w-4" />
+            {isExporting ? "Exporting..." : "Export this page to PDF"}
+          </button>
+        </div>
         {tab === "overview" ? <Overview analytics={analytics} /> : null}
         {tab === "sources" ? <Sources analytics={analytics} /> : null}
         {tab === "conversion" ? <Conversion analytics={analytics} /> : null}
         {tab === "cohorts" ? <Cohorts analytics={analytics} /> : null}
         {tab === "quality" ? <Quality analytics={analytics} /> : null}
       </section>
+
+      {exportMode !== "none" ? (
+        <div ref={exportRef} className="export-report">
+          {exportMode === "all" || tab === "overview" ? (
+            <ReportPage title="Overview">
+              <Overview analytics={analytics} />
+            </ReportPage>
+          ) : null}
+          {exportMode === "all" || tab === "sources" ? (
+            <ReportPage title="Channels & services">
+              <Sources analytics={analytics} />
+            </ReportPage>
+          ) : null}
+          {exportMode === "all" || tab === "conversion" ? (
+            <ReportPage title="Conversion">
+              <Conversion analytics={analytics} />
+            </ReportPage>
+          ) : null}
+          {exportMode === "all" || tab === "cohorts" ? (
+            <ReportPage title="Cohorts">
+              <Cohorts analytics={analytics} />
+            </ReportPage>
+          ) : null}
+          {exportMode === "all" || tab === "quality" ? (
+            <ReportPage title="Quality">
+              <Quality analytics={analytics} />
+            </ReportPage>
+          ) : null}
+        </div>
+      ) : null}
     </main>
   );
 }
