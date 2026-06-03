@@ -238,10 +238,16 @@ export async function parseFinanceWorkbook(file: ArrayBuffer): Promise<FinanceDa
     type: "array",
   });
 
-  const actualSheet = workbook.Sheets["Actual results"];
-  const costSheet = workbook.Sheets["Marketing cost"];
-  const mainNumbersSheet = workbook.Sheets["Main numbers"];
-  const analysisSheet = workbook.Sheets["1st Analysis"];
+  const sheetByName = (name: string) => {
+    const target = name.trim().toLowerCase();
+    const sheetName = workbook.SheetNames.find((item) => item.trim().toLowerCase() === target);
+    return sheetName ? workbook.Sheets[sheetName] : undefined;
+  };
+
+  const actualSheet = sheetByName("Actual results");
+  const costSheet = sheetByName("Marketing cost");
+  const mainNumbersSheet = sheetByName("Main numbers");
+  const analysisSheet = sheetByName("1st Analysis");
   const actualRows = actualSheet
     ? XLSX.utils.sheet_to_json<RawCell[]>(actualSheet, { header: 1, blankrows: false, defval: "", raw: true })
     : [];

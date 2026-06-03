@@ -58,7 +58,7 @@ const DB_NAME = "dc-crm-analytics";
 const DB_VERSION = 1;
 const FILE_STORE = "files";
 const CRM_FILE_KEY = "crm-v3";
-const FINANCE_FILE_KEY = "finance-march-2026";
+const FINANCE_FILE_KEY = "finance-april-2026";
 
 const panelHelp: Record<string, string> = {
   "Monthly trend": "Shows how lead volume, active-qualified leads, rejected leads, and clients changed by lead creation month.",
@@ -1605,7 +1605,7 @@ export default function Home() {
   const [financeData, setFinanceData] = useState<FinanceData | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [fileName, setFileName] = useState("Works with clients 3 sample");
-  const [financeFileName, setFinanceFileName] = useState("DC-Finance-march-2026 sample");
+  const [financeFileName, setFinanceFileName] = useState("April-2026 sample");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
