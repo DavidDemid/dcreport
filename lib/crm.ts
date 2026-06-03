@@ -61,6 +61,30 @@ function text(value: RawCell): string {
   return String(value).trim();
 }
 
+function identityText(value: string): string {
+  return value
+    .replace(/^calendly:\s*/i, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}@.]+/gu, " ")
+    .trim();
+}
+
+export function leadIdentityKey(record: Pick<CRMRecord, "email" | "googleClientId" | "counterparty" | "title" | "id" | "rowNumber">): string {
+  const email = identityText(record.email);
+  if (email) return `email:${email}`;
+
+  const googleClientId = identityText(record.googleClientId);
+  if (googleClientId) return `gclid:${googleClientId}`;
+
+  const counterparty = identityText(record.counterparty);
+  if (counterparty) return `counterparty:${counterparty}`;
+
+  const title = identityText(record.title);
+  if (title) return `title:${title}`;
+
+  return record.id ? `id:${record.id}` : `row:${record.rowNumber}`;
+}
+
 function numberValue(value: RawCell): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const normalized = text(value).replace(/\s/g, "").replace(",", ".");
@@ -281,7 +305,7 @@ export async function parseWorkbook(file: ArrayBuffer): Promise<CRMRecord[]> {
 
 export function compactDate(date: Date | null): string {
   if (!date) return "n/a";
-  return new Intl.DateTimeFormat("en", { month: "short", day: "2-digit", year: "numeric" }).format(date);
+  return new Intl.DateTimeFormat("en", { month: "short", day: "2-digit", year: "numeric", timeZone: "UTC" }).format(date);
 }
 
 export function monthKey(date: Date | null): string {

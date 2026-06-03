@@ -1,4 +1,4 @@
-import { CRMRecord, compactDate, monthDiff, monthKey, monthLabel } from "./crm";
+import { CRMRecord, compactDate, leadIdentityKey, monthDiff, monthKey, monthLabel } from "./crm";
 import { FinanceData } from "./finance";
 
 export type BucketRow = {
@@ -212,6 +212,20 @@ function status(record: CRMRecord): string {
 
 export function isDuplicate(record: CRMRecord): boolean {
   return record.duplicateFlag.toLowerCase() === "true";
+}
+
+function duplicateIdentityCount(records: CRMRecord[]): number {
+  const seen = new Set<string>();
+  let duplicates = 0;
+  for (const record of records) {
+    const key = leadIdentityKey(record);
+    if (isDuplicate(record) || seen.has(key)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(key);
+  }
+  return duplicates;
 }
 
 export function isRelevantStrict(record: CRMRecord): boolean {
@@ -828,7 +842,8 @@ export function buildAnalytics(records: CRMRecord[], finance?: FinanceData): Ana
     .filter((date): date is Date => Boolean(date))
     .sort((a, b) => a.getTime() - b.getTime());
   const total = records.length;
-  const uniqueTotal = records.filter((record) => !isDuplicate(record)).length;
+  const duplicates = duplicateIdentityCount(records);
+  const uniqueTotal = total - duplicates;
   const relevantStrict = records.filter(isRelevantStrict).length;
   const qualifiedActive = records.filter(isQualifiedActive).length;
   const rejected = records.filter(isRejected).length;
@@ -836,7 +851,6 @@ export function buildAnalytics(records: CRMRecord[], finance?: FinanceData): Ana
   const agreementSigned = records.filter(hasAgreementSigned).length;
   const clients = records.filter(isClient).length;
   const fullPaidClients = records.filter(isFullPaidClient).length;
-  const duplicates = records.filter(isDuplicate).length;
   const coverage = fieldCoverage(records);
   const implementedFields = coverage.filter((field) => field.rate > 0).length;
   const serviceRows = servicePerformanceRows(records, finance);
@@ -846,7 +860,9 @@ export function buildAnalytics(records: CRMRecord[], finance?: FinanceData): Ana
     total,
     uniqueTotal,
     dateRange: sortedDates.length
-      ? `${compactDate(sortedDates[0])} - ${compactDate(sortedDates[sortedDates.length - 1])}`
+      ? compactDate(sortedDates[0]) === compactDate(sortedDates[sortedDates.length - 1])
+        ? compactDate(sortedDates[0])
+        : `${compactDate(sortedDates[0])} - ${compactDate(sortedDates[sortedDates.length - 1])}`
       : "n/a",
     relevantStrictRate: pct(relevantStrict, total),
     qualifiedActiveRate: pct(qualifiedActive, total),

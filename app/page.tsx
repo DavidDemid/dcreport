@@ -38,7 +38,7 @@ import {
   hasAgreementSigned,
   isQualifiedActive,
 } from "@/lib/analytics";
-import { CRMRecord, monthKey, parseWorkbook } from "@/lib/crm";
+import { CRMRecord, leadIdentityKey, monthKey, parseWorkbook } from "@/lib/crm";
 import { FinanceChannelCostRecord, FinanceData, parseFinanceWorkbook } from "@/lib/finance";
 
 type Tab = "overview" | "sources" | "conversion" | "cohorts" | "financial" | "quality";
@@ -878,7 +878,7 @@ function Conversion({ analytics }: { analytics: Analytics }) {
         <KpiCard label="Agreement signed" value={formatPercent(analytics.agreementSignedRate)} sub="Signed date or paid stage proxy" help="Uses agreement_signed_at or explicitly paid/signed pipeline statuses." tone="green" />
         <KpiCard label="First payment" value={formatPercent(analytics.clientRate)} sub="Client definition" help="Client = first payment reached, using payment date when present, otherwise payment status proxy." tone="amber" />
         <KpiCard label="Full payment" value={formatPercent(analytics.fullPaidClientRate)} sub="Full-paid client" help="Share of leads that reached full payment or completed status." tone="green" />
-        <KpiCard label="Duplicates" value={formatPercent(analytics.duplicateRate)} sub="Duplicate flag from export" help="Share of rows marked duplicate_flag = true." tone="red" />
+        <KpiCard label="Duplicates" value={formatPercent(analytics.duplicateRate)} sub="Repeated identity rows" help="Rows marked duplicate_flag or repeated by email, Google Client ID, counterparty, or title." tone="red" />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
@@ -1309,15 +1309,22 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
     );
   }
 
-  const financeLeads = activeMonth.financeLeads || activeMonth.leads;
-  const cpl = activeMonth.cpl ?? (financeLeads ? activeMonth.marketingSpend / financeLeads : null);
+  const financeLeads = activeMonth.financeLeads;
+  const crmCreatedLeads = activeMonth.leads;
+  const leadBase = financeLeads || crmCreatedLeads;
+  const previousFinanceLeads = previousMonth?.financeLeads ?? 0;
+  const previousCrmCreatedLeads = previousMonth?.leads ?? 0;
+  const previousLeadBase = previousFinanceLeads || previousCrmCreatedLeads;
+  const leadCountMismatch = Boolean(financeLeads && crmCreatedLeads && financeLeads !== crmCreatedLeads);
+  const cpl = activeMonth.cpl ?? (leadBase ? activeMonth.marketingSpend / leadBase : null);
   const costPerContract = activeMonth.costPerSignedContract ?? (activeMonth.signedContracts ? activeMonth.marketingSpend / activeMonth.signedContracts : null);
-  const leadToContract = activeMonth.leadToContractRate ?? (financeLeads ? activeMonth.signedContracts / financeLeads : null);
-  const clickToLead = activeMonth.clicks ? financeLeads / activeMonth.clicks : null;
+  const leadToContract = activeMonth.leadToContractRate ?? (leadBase ? activeMonth.signedContracts / leadBase : null);
+  const clickToLead = activeMonth.clicks ? leadBase / activeMonth.clicks : null;
   const salesToRevenue = activeMonth.sales ? activeMonth.revenue / activeMonth.sales : null;
   const metricRows: FinancialMetricRow[] = [
     { label: "Clicks", type: "number", actual: activeMonth.clicks, avg: activeMonth.avgClicks, previous: previousMonth?.clicks },
-    { label: "Leads", type: "number", actual: financeLeads, avg: activeMonth.avgLeads, previous: previousMonth?.financeLeads || previousMonth?.leads },
+    { label: "Finance leads", type: "number", actual: financeLeads || null, avg: activeMonth.avgLeads, previous: previousFinanceLeads || null },
+    { label: "CRM created leads", type: "number", actual: crmCreatedLeads, previous: previousCrmCreatedLeads || null },
     { label: "Signed contracts", type: "number", actual: activeMonth.signedContracts, avg: activeMonth.avgSignedContracts, previous: previousMonth?.signedContracts },
     { label: "Lithuania contracts", type: "number", actual: activeMonth.ltContracts, previous: previousMonth?.ltContracts },
     { label: "Latvia contracts", type: "number", actual: activeMonth.lvContracts, previous: previousMonth?.lvContracts },
@@ -1339,7 +1346,7 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
     { label: "Paid traffic CPL", type: "currency", actual: activeMonth.paidTrafficCpl, previous: previousMonth?.paidTrafficCpl },
     { label: "Cost per signed contract", type: "currency", actual: costPerContract, previous: previousMonth?.costPerSignedContract },
     { label: "Click to lead conversion", type: "percent", actual: clickToLead },
-    { label: "Lead to contract conversion", type: "percent", actual: leadToContract, previous: previousMonth?.leadToContractRate },
+    { label: "Lead to contract conversion", type: "percent", actual: leadToContract, previous: previousLeadBase ? (previousMonth?.signedContracts ?? 0) / previousLeadBase : previousMonth?.leadToContractRate },
     { label: "Revenue / sales relation", type: "percent", actual: salesToRevenue },
   ];
 
@@ -1349,7 +1356,7 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
         <div>
           <h2 className="text-lg font-semibold text-slate-950">Marketing & sales funnel</h2>
           <p className="mt-1 text-sm text-slate-600">
-            Latest available finance month: <strong>{months[0]?.label}</strong>. Monthly actuals from the finance workbook, matched with CRM country/service rows for the selected month.
+            Latest available finance month: <strong>{months[0]?.label}</strong>. Finance leads come from the finance workbook; CRM created leads are counted from CRM rows by `Дата створення`.
           </p>
         </div>
         <select
@@ -1365,7 +1372,8 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <KpiCard label="Clicks" value={formatNumber(activeMonth.clicks)} sub="All traffic clicks from finance" help="Total clicks from the monthly finance funnel, not only CRM rows." />
-        <KpiCard label="Leads" value={formatNumber(financeLeads)} sub="Finance monthly total" help="Monthly lead count from finance. This may differ from CRM filtered leads if finance includes BridgeWest/Calendly totals." tone="blue" />
+        <KpiCard label="Finance leads" value={formatNumber(financeLeads)} sub="Main numbers monthly total" help="Lead count from the finance workbook. Use this for finance funnel CPL and plan/actual comparison." tone="blue" />
+        <KpiCard label="CRM created leads" value={formatNumber(crmCreatedLeads)} sub="CRM rows by creation date" help="Rows from the CRM export where `Дата створення` falls inside the selected month. Overview, channels, services, conversions, and cohorts use this CRM count." tone="blue" />
         <KpiCard label="Signed contracts" value={formatNumber(activeMonth.signedContracts)} sub={`${formatNumber(activeMonth.ltContracts)} LT · ${formatNumber(activeMonth.lvContracts)} LV · ${formatNumber(activeMonth.rbiContracts)} other/RBI`} help="Signed contracts from the finance workbook. Other/RBI is the remaining contracts after LT and LV where no separate RBI contract field exists." tone="green" />
         <KpiCard label="Sales" value={formatCurrency(activeMonth.sales)} sub="Signed contract value" help="Sales means contract value signed in the month, not cash received." tone="green" />
         <KpiCard label="Revenue" value={formatCurrency(activeMonth.revenue)} sub="Cash received" help="Actual money received from clients during the selected month." />
@@ -1381,11 +1389,18 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
         <KpiCard label="Lead to contract" value={formatPercent(leadToContract ?? 0)} sub="Signed contracts / leads" help="Monthly signed contract conversion from finance leads." tone="green" />
       </div>
 
+      {leadCountMismatch ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+          Lead count audit for {activeMonth.label}: finance workbook shows <strong>{formatNumber(financeLeads)}</strong> leads, while CRM export has <strong>{formatNumber(crmCreatedLeads)}</strong> created rows by `Дата створення`.
+          Finance CPL uses finance leads; CRM pages use CRM created leads. This difference is expected when finance lead totals and CRM export rows are not the same source definition.
+        </div>
+      ) : null}
+
       <Panel title="Financial funnel">
         <div className="grid gap-3 md:grid-cols-5">
           {[
             { label: "Clicks", value: formatNumber(activeMonth.clicks), sub: clickToLead === null ? "n/a" : `${formatPercent(clickToLead)} click to lead` },
-            { label: "Leads", value: formatNumber(financeLeads), sub: leadToContract === null ? "n/a" : `${formatPercent(leadToContract)} lead to contract` },
+            { label: financeLeads ? "Finance leads" : "CRM leads", value: formatNumber(leadBase), sub: leadToContract === null ? "n/a" : `${formatPercent(leadToContract)} lead to contract` },
             { label: "Signed contracts", value: formatNumber(activeMonth.signedContracts), sub: activeMonth.signedContracts ? `${formatCurrency(activeMonth.sales / activeMonth.signedContracts)} sales / contract` : "n/a" },
             { label: "Sales", value: formatCurrency(activeMonth.sales), sub: salesToRevenue === null ? "n/a" : `${formatPercent(salesToRevenue)} revenue / sales` },
             { label: "Revenue", value: formatCurrency(activeMonth.revenue), sub: `${formatCurrency(activeMonth.profitAfterMarketing)} profit after marketing` },
@@ -1409,7 +1424,8 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
               <YAxis yAxisId="money" orientation="right" tickFormatter={(value) => `€${Math.round(Number(value) / 1000)}k`} tick={{ fontSize: 12 }} />
               <Tooltip formatter={(value, name) => ["Sales", "Revenue", "Marketing cost", "Profit after marketing"].includes(String(name)) ? formatCurrency(numericValue(value)) : formatNumber(numericValue(value))} />
               <Legend />
-              <Bar isAnimationActive={false} yAxisId="count" dataKey="financeLeads" fill="#2563eb" name="Leads" radius={[3, 3, 0, 0]} />
+              <Bar isAnimationActive={false} yAxisId="count" dataKey="financeLeads" fill="#2563eb" name="Finance leads" radius={[3, 3, 0, 0]} />
+              <Line isAnimationActive={false} yAxisId="count" type="monotone" dataKey="leads" stroke="#0f172a" strokeWidth={2} name="CRM created leads" dot={false} />
               <Bar isAnimationActive={false} yAxisId="count" dataKey="signedContracts" fill="#16a34a" name="Signed contracts" radius={[3, 3, 0, 0]} />
               <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="sales" stroke="#7c3aed" strokeWidth={2} name="Sales" dot={false} />
               <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="revenue" stroke="#0891b2" strokeWidth={2} name="Revenue" dot={false} />
@@ -1553,7 +1569,7 @@ function Quality({ analytics }: { analytics: Analytics }) {
     <div className="space-y-5">
       <div className="grid gap-4 md:grid-cols-3">
         <KpiCard label="Field implementation" value={formatPercent(analytics.fieldImplementationRate)} sub="Fields with any usable values" help="Share of tracked analytics fields that have at least one filled value in the current dataset." />
-        <KpiCard label="Duplicate rate" value={formatPercent(analytics.duplicateRate)} sub="Flagged rows" help="Share of CRM rows marked duplicate_flag = true." tone="red" />
+        <KpiCard label="Duplicate rate" value={formatPercent(analytics.duplicateRate)} sub="Repeated identity rows" help="Rows marked duplicate_flag or repeated by email, Google Client ID, counterparty, or title." tone="red" />
         <KpiCard label="Full payment coverage" value={formatPercent(analytics.fullPaidClientRate)} sub="Full payment or completed" help="Share of leads that reached full payment or completed status." tone="green" />
       </div>
 
@@ -1600,6 +1616,37 @@ function ReportPage({ title, children }: { title: string; children: ReactNode })
   );
 }
 
+function dedupeScore(record: CRMRecord) {
+  let score = 0;
+  if (record.duplicateFlag.toLowerCase() !== "true") score += 20;
+  if (record.status.toUpperCase() !== "INTERNAL MAIL") score += 15;
+  if (!["DOUBLE", "SPAM", "NON-RELEVANT LEAD"].includes(record.rejectionReason.toUpperCase())) score += 10;
+  if (record.reportingService !== "Other / Unknown") score += 8;
+  if (record.source !== "Unknown") score += 6;
+  if (record.relevant.trim()) score += 5;
+  if (record.country !== "Unknown") score += 3;
+  if (record.firstContactAt || record.firstResponseAt || record.meetingBookedAt || record.meetingHeldAt) score += 4;
+  if (record.agreementSentAt || record.agreementSignedAt || record.firstPaymentAt || record.fullPaymentAt) score += 10;
+  if (record.createdAt) score += 1;
+  return score;
+}
+
+function uniqueLeadRecords(records: CRMRecord[]) {
+  const byIdentity = new Map<string, CRMRecord>();
+  for (const record of records) {
+    const key = leadIdentityKey(record);
+    const current = byIdentity.get(key);
+    if (!current || dedupeScore(record) > dedupeScore(current)) {
+      byIdentity.set(key, record);
+    }
+  }
+  return [...byIdentity.values()].sort((a, b) => {
+    const aTime = a.createdAt?.getTime() ?? 0;
+    const bTime = b.createdAt?.getTime() ?? 0;
+    return aTime - bTime || a.rowNumber - b.rowNumber;
+  });
+}
+
 export default function Home() {
   const [records, setRecords] = useState<CRMRecord[]>([]);
   const [financeData, setFinanceData] = useState<FinanceData | null>(null);
@@ -1609,7 +1656,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
-  const [uniqueOnly, setUniqueOnly] = useState(false);
+  const [uniqueOnly, setUniqueOnly] = useState(true);
   const [selectedServices, setSelectedServices] = useState<string[]>([]);
   const [isExporting, setIsExporting] = useState(false);
   const [exportMode, setExportMode] = useState<"none" | "current" | "all">("none");
@@ -1664,14 +1711,14 @@ export default function Home() {
     const fromDate = dateFromInput(dateRange.from);
     const toDate = dateFromInput(dateRange.to, true);
 
-    return records.filter((record) => {
+    const dateFiltered = records.filter((record) => {
       if (!fromDate && !toDate) return true;
       if (!record.createdAt) return false;
       if (fromDate && record.createdAt < fromDate) return false;
       if (toDate && record.createdAt > toDate) return false;
-      if (uniqueOnly && record.duplicateFlag.toLowerCase() === "true") return false;
       return true;
     });
+    return uniqueOnly ? uniqueLeadRecords(dateFiltered) : dateFiltered;
   }, [dateRange.from, dateRange.to, records, uniqueOnly]);
 
   const serviceOptions = useMemo(
@@ -1724,7 +1771,7 @@ export default function Home() {
 
   function resetAllFilters() {
     setDateRange(fullDateBounds);
-    setUniqueOnly(false);
+    setUniqueOnly(true);
     setSelectedServices([]);
   }
 
@@ -1736,7 +1783,7 @@ export default function Home() {
       const parsed = await parseWorkbook(buffer);
       setRecords(parsed);
       setDateRange(getDateBounds(parsed));
-      setUniqueOnly(false);
+      setUniqueOnly(true);
       setSelectedServices([]);
       setFileName(file.name);
       await saveReportFile(CRM_FILE_KEY, file.name, buffer.slice(0));
@@ -1978,7 +2025,7 @@ export default function Home() {
                     ? "border-blue-600 bg-blue-50 text-blue-700"
                     : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50",
                 )}
-                title="Unique leads only excludes duplicate_flag = true rows"
+                title="Unique leads only keeps one best CRM row per email, Google Client ID, counterparty, or title; All leads shows raw CRM rows."
               >
                 {uniqueOnly ? "Unique leads only" : "All leads"}
               </button>
