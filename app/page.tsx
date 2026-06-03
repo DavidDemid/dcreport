@@ -12,6 +12,7 @@ import {
   Filter,
   Info,
   Layers3,
+  LogOut,
   RefreshCw,
   Upload,
 } from "lucide-react";
@@ -28,11 +29,19 @@ import {
   YAxis,
 } from "recharts";
 import clsx from "clsx";
-import { Analytics, buildAnalytics, formatCurrency, formatNumber, formatPercent } from "@/lib/analytics";
+import {
+  Analytics,
+  buildAnalytics,
+  formatCurrency,
+  formatNumber,
+  formatPercent,
+  hasAgreementSigned,
+  isQualifiedActive,
+} from "@/lib/analytics";
 import { CRMRecord, monthKey, parseWorkbook } from "@/lib/crm";
 import { FinanceChannelCostRecord, FinanceData, parseFinanceWorkbook } from "@/lib/finance";
 
-type Tab = "overview" | "sources" | "conversion" | "cohorts" | "quality";
+type Tab = "overview" | "sources" | "conversion" | "cohorts" | "financial" | "quality";
 
 const COLORS = ["#2563eb", "#16a34a", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#be123c", "#475569"];
 
@@ -41,12 +50,15 @@ const tabs: { id: Tab; label: string; icon: typeof BarChart3 }[] = [
   { id: "sources", label: "Channels & services", icon: Filter },
   { id: "conversion", label: "Conversion", icon: Activity },
   { id: "cohorts", label: "Cohorts", icon: Layers3 },
+  { id: "financial", label: "Financial funnel", icon: FileSpreadsheet },
   { id: "quality", label: "Quality", icon: CheckCircle2 },
 ];
 
 const DB_NAME = "dc-crm-analytics";
 const DB_VERSION = 1;
 const FILE_STORE = "files";
+const CRM_FILE_KEY = "crm-v3";
+const FINANCE_FILE_KEY = "finance-march-2026";
 
 const panelHelp: Record<string, string> = {
   "Monthly trend": "Shows how lead volume, active-qualified leads, rejected leads, and clients changed by lead creation month.",
@@ -72,6 +84,9 @@ const panelHelp: Record<string, string> = {
   "Monthly cohorts": "Groups leads by creation month and tracks payment timing using real first_payment_at dates only.",
   "Service cohorts": "Separate cohort tables by normalized product/service. Each service shows latest 10 monthly cohorts and payment timing.",
   "Cohort conversion trend": "Compares cohort quality: active-qualified rate, current paid proxy, paid with date by M5, and rejected rate.",
+  "Financial monthly table": "Compares selected month actuals against plan, previous month, and 3-month averages from the finance workbook.",
+  "Financial funnel": "Shows the monthly funnel from clicks to leads, signed contracts, sales, revenue, and profit after marketing.",
+  "Country-level financial performance": "Country and service rows for the selected month, using CRM leads and estimated marketing cost by lead share.",
   "Field completeness": "Shows how often important CRM fields are filled and whether metrics still depend on status proxies.",
 };
 
@@ -196,6 +211,13 @@ function allocateFinanceToRecords(finance: FinanceData | undefined, baseRecords:
         marketingCost: allocatedCostByMonth.get(record.month) ?? record.marketingCost * share,
         profitAfterMarketing: record.profitAfterMarketing * share,
         signedContracts: record.signedContracts * share,
+        clicks: (record.clicks ?? 0) * share,
+        leads: (record.leads ?? 0) * share,
+        paidTrafficCost: (record.paidTrafficCost ?? 0) * share,
+        sales: (record.sales ?? 0) * share,
+        ltContracts: (record.ltContracts ?? 0) * share,
+        lvContracts: (record.lvContracts ?? 0) * share,
+        rbiContracts: (record.rbiContracts ?? 0) * share,
       };
     }),
   };
@@ -223,7 +245,7 @@ function openReportsDb(): Promise<IDBDatabase> {
   });
 }
 
-async function saveReportFile(key: "crm" | "finance", name: string, buffer: ArrayBuffer) {
+async function saveReportFile(key: string, name: string, buffer: ArrayBuffer) {
   const db = await openReportsDb();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(FILE_STORE, "readwrite");
@@ -234,7 +256,7 @@ async function saveReportFile(key: "crm" | "finance", name: string, buffer: Arra
   db.close();
 }
 
-async function loadReportFile(key: "crm" | "finance"): Promise<{ name: string; buffer: ArrayBuffer } | null> {
+async function loadReportFile(key: string): Promise<{ name: string; buffer: ArrayBuffer } | null> {
   const db = await openReportsDb();
   const result = await new Promise<{ name: string; buffer: ArrayBuffer } | null>((resolve, reject) => {
     const tx = db.transaction(FILE_STORE, "readonly");
@@ -411,11 +433,52 @@ function ServiceFilter({
   );
 }
 
-function Overview({ analytics }: { analytics: Analytics }) {
+type ReportScope = {
+  rawTotal: number;
+  dateAndQualityTotal: number;
+  visibleTotal: number;
+  hasActiveFilters: boolean;
+  filterDescription: string;
+};
+
+function FilterSummary({ scope, onReset }: { scope: ReportScope; onReset?: () => void }) {
+  if (!scope.hasActiveFilters) return null;
+
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="font-semibold">Filtered view is active</div>
+          <div className="mt-1 text-amber-800">
+            Showing {formatNumber(scope.visibleTotal)} rows in the current report view. Date/unique filters leave {formatNumber(scope.dateAndQualityTotal)} rows from {formatNumber(scope.rawTotal)} rows in the full CRM file. {scope.filterDescription}
+          </div>
+        </div>
+        {onReset ? (
+          <button
+            type="button"
+            onClick={onReset}
+            className="inline-flex h-9 shrink-0 items-center justify-center rounded-md border border-amber-300 bg-white px-3 text-sm font-semibold text-amber-900 transition hover:bg-amber-100"
+          >
+            Reset all filters
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function Overview({ analytics, scope, onResetFilters }: { analytics: Analytics; scope: ReportScope; onResetFilters?: () => void }) {
   return (
     <div className="space-y-5">
+      <FilterSummary scope={scope} onReset={onResetFilters} />
+
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Total leads" value={formatNumber(analytics.total)} sub={`${analytics.dateRange} · ${formatNumber(analytics.uniqueTotal)} unique`} help="All CRM rows after date and duplicate filters. Unique count excludes duplicate_flag = true." />
+        <KpiCard
+          label="Total leads"
+          value={formatNumber(analytics.total)}
+          sub={`${analytics.dateRange} · ${formatNumber(analytics.uniqueTotal)} unique · ${formatNumber(scope.rawTotal)} rows in CRM file`}
+          help="Leads in the current report view after date, unique, and service filters. The full CRM file total is shown in the subtitle."
+        />
         <KpiCard label="Relevant rate" value={formatPercent(analytics.relevantStrictRate)} sub="Strict: Relevant = Relevant" help="Strict metric from the Relevant field only." tone="green" />
         <KpiCard label="Rejected rate" value={formatPercent(analytics.rejectedRate)} sub="Rejected or lost leads" help="Rejected leads divided by all leads in the current filter. Uses Rejected status or lost_at." tone="red" />
         <KpiCard label="Client rate" value={formatPercent(analytics.clientRate)} sub="First payment date or payment proxy" help="Client means first payment reached. If payment date is empty, status/payment_status can still mark the lead as client." tone="amber" />
@@ -636,7 +699,7 @@ function ServiceChannelTable({ rows, showService = true }: { rows: Analytics["se
   );
 }
 
-function Sources({ analytics }: { analytics: Analytics }) {
+function Sources({ analytics, scope, onResetFilters }: { analytics: Analytics; scope: ReportScope; onResetFilters?: () => void }) {
   const serviceChannelGroups = useMemo(() => {
     const grouped = new Map<string, Analytics["serviceChannelRows"]>();
     for (const row of analytics.serviceChannelRows) {
@@ -656,11 +719,13 @@ function Sources({ analytics }: { analytics: Analytics }) {
 
   return (
     <div className="space-y-5">
+      <FilterSummary scope={scope} onReset={onResetFilters} />
+
       <div className="grid gap-5 xl:grid-cols-2">
         <Panel title="Lead acquisition by channel">
-          <div className="h-[340px]">
+          <div style={{ height: Math.max(340, analytics.sourceRows.length * 50) }}>
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={analytics.sourceRows.slice(0, 8)} layout="vertical" margin={{ left: 12, right: 12 }}>
+              <BarChart data={analytics.sourceRows} layout="vertical" margin={{ left: 12, right: 12 }}>
                 <CartesianGrid stroke="#e2e8f0" horizontal={false} />
                 <XAxis type="number" tick={{ fontSize: 12 }} />
                 <YAxis dataKey="name" type="category" width={150} tick={{ fontSize: 12 }} />
@@ -771,8 +836,8 @@ function Sources({ analytics }: { analytics: Analytics }) {
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           {analytics.sourceServiceMatrix.map((row) => (
             <div key={`${row.source}-${row.service}`} className="rounded-lg border border-slate-200 p-4">
-              <div className="truncate text-sm font-semibold text-slate-950">{row.source}</div>
-              <div className="mt-1 truncate text-xs text-slate-500">{row.service}</div>
+              <div className="break-words text-sm font-semibold leading-snug text-slate-950">{row.source}</div>
+              <div className="mt-1 break-words text-xs leading-snug text-slate-500">{row.service}</div>
               <div className="mt-4 flex items-end justify-between gap-3">
                 <span className="text-2xl font-semibold text-slate-950">{formatNumber(row.leads)}</span>
                 <span className="text-right text-sm font-medium text-amber-700">
@@ -929,9 +994,9 @@ function Conversion({ analytics }: { analytics: Analytics }) {
 
       <div className="grid gap-5 xl:grid-cols-2">
         <Panel title="Conversion by channel">
-          <div className="h-[360px]">
+          <div style={{ height: Math.max(360, analytics.sourceRows.length * 54) }}>
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={analytics.sourceRows.slice(0, 8)}>
+              <ComposedChart data={analytics.sourceRows}>
                 <CartesianGrid stroke="#e2e8f0" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 12 }} interval={0} angle={-25} textAnchor="end" height={82} />
                 <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
@@ -949,9 +1014,9 @@ function Conversion({ analytics }: { analytics: Analytics }) {
         </Panel>
 
         <Panel title="Conversion by service">
-          <div className="h-[360px]">
+          <div style={{ height: Math.max(360, analytics.serviceRows.length * 58) }}>
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={analytics.serviceRows.slice(0, 8)}>
+              <ComposedChart data={analytics.serviceRows}>
                 <CartesianGrid stroke="#e2e8f0" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 12 }} interval={0} angle={-25} textAnchor="end" height={82} />
                 <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
@@ -1125,6 +1190,358 @@ function Cohorts({ analytics }: { analytics: Analytics }) {
   );
 }
 
+type FinancialMetricRow = {
+  label: string;
+  type: "number" | "currency" | "percent";
+  actual: number | null;
+  plan?: number | null;
+  planAvg?: number | null;
+  avg?: number | null;
+  previous?: number | null;
+};
+
+function formatMetricValue(value: number | null | undefined, type: FinancialMetricRow["type"]) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "n/a";
+  if (type === "currency") return formatCurrency(value);
+  if (type === "percent") return formatPercent(value);
+  return formatNumber(value);
+}
+
+function financialDelta(actual: number | null | undefined, base: number | null | undefined, type: FinancialMetricRow["type"]) {
+  if (actual === null || actual === undefined || base === null || base === undefined || Number.isNaN(actual) || Number.isNaN(base)) return "n/a";
+  return formatMetricValue(actual - base, type);
+}
+
+function countryNote(leads: number, qualified: number, signedContracts: number, cpl: number | null, conversionRate: number) {
+  if (leads >= 20 && signedContracts === 0) return "High lead volume, no contracts. Check quality or sales follow-up.";
+  if (signedContracts > 0 && conversionRate >= 0.08) return "Strong conversion. Candidate for budget focus.";
+  if (cpl !== null && cpl > 150 && signedContracts === 0) return "High estimated CPL without contracts.";
+  if (qualified > 0 && signedContracts === 0) return "Qualified pipeline exists, contract conversion not visible yet.";
+  return "Monitor.";
+}
+
+function countryFinancialRows(records: CRMRecord[], month: string, marketingCost: number, paidTrafficCost: number, revenue: number, sales: number) {
+  const monthRecords = records.filter((record) => monthKey(record.createdAt) === month);
+  const grouped = new Map<string, CRMRecord[]>();
+  for (const record of monthRecords) {
+    const country = record.country || "Unknown";
+    const key = `${country}|||${record.reportingService}`;
+    grouped.set(key, [...(grouped.get(key) ?? []), record]);
+  }
+
+  return [...grouped.entries()]
+    .map(([key, group]) => {
+      const [country, service] = key.split("|||");
+      const leads = group.length;
+      const qualified = group.filter(isQualifiedActive).length;
+      const signedContracts = group.filter(hasAgreementSigned).length;
+      const crmSalesValue = group.reduce((sum, record) => sum + (record.dealValueActual ?? 0), 0);
+      const share = monthRecords.length ? leads / monthRecords.length : 0;
+      const estimatedCost = marketingCost * share;
+      const estimatedPaidTrafficCost = paidTrafficCost * share;
+      const estimatedRevenue = revenue * share;
+      const estimatedSales = sales * share;
+      const salesValue = crmSalesValue || estimatedSales;
+      const conversionRate = leads ? signedContracts / leads : 0;
+      const cpl = estimatedCost && leads ? estimatedCost / leads : null;
+      return {
+        country,
+        service,
+        leads,
+        qualified,
+        signedContracts,
+        salesValue,
+        estimatedRevenue,
+        estimatedCost,
+        estimatedPaidTrafficCost,
+        cpl,
+        cpql: estimatedCost && qualified ? estimatedCost / qualified : null,
+        costPerContract: estimatedCost && signedContracts ? estimatedCost / signedContracts : null,
+        conversionRate,
+        note: countryNote(leads, qualified, signedContracts, cpl, conversionRate),
+      };
+    })
+    .filter((row) => row.leads > 0)
+    .sort((a, b) => b.leads - a.leads);
+}
+
+function FinancialReport({ analytics, records, financeData }: { analytics: Analytics; records: CRMRecord[]; financeData: FinanceData | null }) {
+  const financialAnalytics = useMemo(
+    () => (financeData ? buildAnalytics(records, financeData) : analytics),
+    [analytics, financeData, records],
+  );
+  const months = financialAnalytics.monthly
+    .filter((row) => row.revenue || row.marketingSpend || row.sales || row.clicks || row.financeLeads || row.signedContracts)
+    .sort((a, b) => b.month.localeCompare(a.month));
+  const [selectedMonth, setSelectedMonth] = useState(months[0]?.month ?? "");
+  const [selectedCountry, setSelectedCountry] = useState("");
+  const [selectedCountryService, setSelectedCountryService] = useState("");
+  const activeMonth = months.find((row) => row.month === selectedMonth) ?? months[0];
+  const previousMonth = activeMonth ? months.find((row) => row.month < activeMonth.month) : undefined;
+  const countryRowsBase = activeMonth
+    ? countryFinancialRows(records, activeMonth.month, activeMonth.marketingSpend, activeMonth.paidTrafficCost, activeMonth.revenue, activeMonth.sales)
+    : [];
+  const countryOptions = [...new Set(countryRowsBase.map((row) => row.country))].sort((a, b) => a.localeCompare(b));
+  const countryServiceOptions = [...new Set(countryRowsBase.map((row) => row.service))].sort((a, b) => a.localeCompare(b));
+  const countryRows = countryRowsBase
+    .filter((row) => !selectedCountry || row.country === selectedCountry)
+    .filter((row) => !selectedCountryService || row.service === selectedCountryService)
+    .slice(0, 24);
+  const trendRows = [...months].sort((a, b) => a.month.localeCompare(b.month));
+
+  useEffect(() => {
+    if (!months.length) return;
+    if (!selectedMonth || !months.some((row) => row.month === selectedMonth)) setSelectedMonth(months[0].month);
+  }, [months, selectedMonth]);
+
+  useEffect(() => {
+    if (selectedCountry && !countryOptions.includes(selectedCountry)) setSelectedCountry("");
+    if (selectedCountryService && !countryServiceOptions.includes(selectedCountryService)) setSelectedCountryService("");
+  }, [countryOptions, countryServiceOptions, selectedCountry, selectedCountryService]);
+
+  if (!activeMonth) {
+    return (
+      <Panel title="Financial funnel">
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          Finance workbook is loaded, but no monthly financial rows were found. Upload `DC-Finance-march-2026.xlsx` or a workbook with a `Main numbers` sheet.
+        </div>
+      </Panel>
+    );
+  }
+
+  const financeLeads = activeMonth.financeLeads || activeMonth.leads;
+  const cpl = activeMonth.cpl ?? (financeLeads ? activeMonth.marketingSpend / financeLeads : null);
+  const costPerContract = activeMonth.costPerSignedContract ?? (activeMonth.signedContracts ? activeMonth.marketingSpend / activeMonth.signedContracts : null);
+  const leadToContract = activeMonth.leadToContractRate ?? (financeLeads ? activeMonth.signedContracts / financeLeads : null);
+  const clickToLead = activeMonth.clicks ? financeLeads / activeMonth.clicks : null;
+  const salesToRevenue = activeMonth.sales ? activeMonth.revenue / activeMonth.sales : null;
+  const metricRows: FinancialMetricRow[] = [
+    { label: "Clicks", type: "number", actual: activeMonth.clicks, avg: activeMonth.avgClicks, previous: previousMonth?.clicks },
+    { label: "Leads", type: "number", actual: financeLeads, avg: activeMonth.avgLeads, previous: previousMonth?.financeLeads || previousMonth?.leads },
+    { label: "Signed contracts", type: "number", actual: activeMonth.signedContracts, avg: activeMonth.avgSignedContracts, previous: previousMonth?.signedContracts },
+    { label: "Lithuania contracts", type: "number", actual: activeMonth.ltContracts, previous: previousMonth?.ltContracts },
+    { label: "Latvia contracts", type: "number", actual: activeMonth.lvContracts, previous: previousMonth?.lvContracts },
+    { label: "Other / RBI contracts", type: "number", actual: activeMonth.rbiContracts, previous: previousMonth?.rbiContracts },
+    { label: "Sales value", type: "currency", actual: activeMonth.sales, avg: activeMonth.avgSales, previous: previousMonth?.sales },
+    { label: "Revenue received", type: "currency", actual: activeMonth.revenue, avg: activeMonth.avgRevenue, previous: previousMonth?.revenue },
+    { label: "Marketing cost", type: "currency", actual: activeMonth.marketingSpend, avg: activeMonth.avgMarketingCost, previous: previousMonth?.marketingSpend },
+    { label: "Paid traffic cost", type: "currency", actual: activeMonth.paidTrafficCost, avg: activeMonth.avgPaidTrafficCost, previous: previousMonth?.paidTrafficCost },
+    {
+      label: "Profit after marketing",
+      type: "currency",
+      actual: activeMonth.profitAfterMarketing,
+      plan: activeMonth.planProfitAfterMarketing,
+      planAvg: activeMonth.planProfitAfterMarketing3MonthAverage,
+      avg: activeMonth.avgProfitAfterMarketing,
+      previous: previousMonth?.profitAfterMarketing,
+    },
+    { label: "CPL", type: "currency", actual: cpl, previous: previousMonth?.cpl },
+    { label: "Paid traffic CPL", type: "currency", actual: activeMonth.paidTrafficCpl, previous: previousMonth?.paidTrafficCpl },
+    { label: "Cost per signed contract", type: "currency", actual: costPerContract, previous: previousMonth?.costPerSignedContract },
+    { label: "Click to lead conversion", type: "percent", actual: clickToLead },
+    { label: "Lead to contract conversion", type: "percent", actual: leadToContract, previous: previousMonth?.leadToContractRate },
+    { label: "Revenue / sales relation", type: "percent", actual: salesToRevenue },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-950">Marketing & sales funnel</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Latest available finance month: <strong>{months[0]?.label}</strong>. Monthly actuals from the finance workbook, matched with CRM country/service rows for the selected month.
+          </p>
+        </div>
+        <select
+          value={activeMonth.month}
+          onChange={(event) => setSelectedMonth(event.target.value)}
+          className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-800"
+        >
+          {months.map((row) => (
+            <option key={row.month} value={row.month}>{row.label}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <KpiCard label="Clicks" value={formatNumber(activeMonth.clicks)} sub="All traffic clicks from finance" help="Total clicks from the monthly finance funnel, not only CRM rows." />
+        <KpiCard label="Leads" value={formatNumber(financeLeads)} sub="Finance monthly total" help="Monthly lead count from finance. This may differ from CRM filtered leads if finance includes BridgeWest/Calendly totals." tone="blue" />
+        <KpiCard label="Signed contracts" value={formatNumber(activeMonth.signedContracts)} sub={`${formatNumber(activeMonth.ltContracts)} LT · ${formatNumber(activeMonth.lvContracts)} LV · ${formatNumber(activeMonth.rbiContracts)} other/RBI`} help="Signed contracts from the finance workbook. Other/RBI is the remaining contracts after LT and LV where no separate RBI contract field exists." tone="green" />
+        <KpiCard label="Sales" value={formatCurrency(activeMonth.sales)} sub="Signed contract value" help="Sales means contract value signed in the month, not cash received." tone="green" />
+        <KpiCard label="Revenue" value={formatCurrency(activeMonth.revenue)} sub="Cash received" help="Actual money received from clients during the selected month." />
+        <KpiCard label="Marketing cost" value={formatCurrency(activeMonth.marketingSpend)} sub="Total marketing cost" help="Total monthly marketing expenditure from finance." tone="amber" />
+        <KpiCard label="Paid traffic cost" value={formatCurrency(activeMonth.paidTrafficCost)} sub="Google/Bing/paid traffic" help="Paid traffic cost excludes non-PPC marketing items where the finance file separates them." tone="amber" />
+        <KpiCard label="Profit after marketing" value={formatCurrency(activeMonth.profitAfterMarketing)} sub="Revenue - marketing cost" help="Revenue received minus total marketing cost." tone="green" />
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <KpiCard label="CPL" value={formatCurrency(cpl)} sub="Marketing cost / leads" help="Average marketing cost per finance lead." />
+        <KpiCard label="Paid traffic CPL" value={formatCurrency(activeMonth.paidTrafficCpl)} sub="Paid traffic / leads" help="Paid traffic cost divided by finance leads." />
+        <KpiCard label="Cost per signed contract" value={formatCurrency(costPerContract)} sub="Marketing cost / contracts" help="Total marketing cost divided by signed contracts." tone="amber" />
+        <KpiCard label="Lead to contract" value={formatPercent(leadToContract ?? 0)} sub="Signed contracts / leads" help="Monthly signed contract conversion from finance leads." tone="green" />
+      </div>
+
+      <Panel title="Financial funnel">
+        <div className="grid gap-3 md:grid-cols-5">
+          {[
+            { label: "Clicks", value: formatNumber(activeMonth.clicks), sub: clickToLead === null ? "n/a" : `${formatPercent(clickToLead)} click to lead` },
+            { label: "Leads", value: formatNumber(financeLeads), sub: leadToContract === null ? "n/a" : `${formatPercent(leadToContract)} lead to contract` },
+            { label: "Signed contracts", value: formatNumber(activeMonth.signedContracts), sub: activeMonth.signedContracts ? `${formatCurrency(activeMonth.sales / activeMonth.signedContracts)} sales / contract` : "n/a" },
+            { label: "Sales", value: formatCurrency(activeMonth.sales), sub: salesToRevenue === null ? "n/a" : `${formatPercent(salesToRevenue)} revenue / sales` },
+            { label: "Revenue", value: formatCurrency(activeMonth.revenue), sub: `${formatCurrency(activeMonth.profitAfterMarketing)} profit after marketing` },
+          ].map((step) => (
+            <div key={step.label} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <div className="text-xs font-semibold uppercase text-slate-500">{step.label}</div>
+              <div className="mt-2 text-2xl font-semibold text-slate-950">{step.value}</div>
+              <div className="mt-1 text-sm text-slate-600">{step.sub}</div>
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel title="Financial monthly trend" exportSplit>
+        <div className="h-[380px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={trendRows}>
+              <CartesianGrid stroke="#e2e8f0" vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 12 }} />
+              <YAxis yAxisId="count" tick={{ fontSize: 12 }} />
+              <YAxis yAxisId="money" orientation="right" tickFormatter={(value) => `€${Math.round(Number(value) / 1000)}k`} tick={{ fontSize: 12 }} />
+              <Tooltip formatter={(value, name) => ["Sales", "Revenue", "Marketing cost", "Profit after marketing"].includes(String(name)) ? formatCurrency(numericValue(value)) : formatNumber(numericValue(value))} />
+              <Legend />
+              <Bar isAnimationActive={false} yAxisId="count" dataKey="financeLeads" fill="#2563eb" name="Leads" radius={[3, 3, 0, 0]} />
+              <Bar isAnimationActive={false} yAxisId="count" dataKey="signedContracts" fill="#16a34a" name="Signed contracts" radius={[3, 3, 0, 0]} />
+              <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="sales" stroke="#7c3aed" strokeWidth={2} name="Sales" dot={false} />
+              <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="revenue" stroke="#0891b2" strokeWidth={2} name="Revenue" dot={false} />
+              <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="marketingSpend" stroke="#f59e0b" strokeWidth={2} name="Marketing cost" dot={false} />
+              <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="profitAfterMarketing" stroke="#dc2626" strokeWidth={2} name="Profit after marketing" dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </Panel>
+
+      <Panel title="Financial monthly table" exportSplit>
+        <div className="overflow-hidden">
+          <table className="w-full table-fixed text-xs lg:text-sm">
+            <colgroup>
+              <col className="w-[22%]" />
+              <col />
+              <col />
+              <col />
+              <col />
+              <col />
+              <col />
+              <col />
+            </colgroup>
+            <thead>
+              <tr className="border-b border-slate-200 text-left text-[11px] uppercase leading-tight text-slate-500">
+                <th className="px-2 py-3">Metric</th>
+                <th className="px-2 py-3 text-right">Plan / target</th>
+                <th className="px-2 py-3 text-right">Actual this month</th>
+                <th className="px-2 py-3 text-right">Previous</th>
+                <th className="px-2 py-3 text-right">Vs previous</th>
+                <th className="px-2 py-3 text-right">Vs target</th>
+                <th className="px-2 py-3 text-right">3-mo avg</th>
+                <th className="px-2 py-3 text-right">Plan 3-mo avg</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metricRows.map((row) => (
+                <tr key={row.label} className="border-b border-slate-100">
+                  <td className="break-words px-2 py-3 font-medium text-slate-950">{row.label}</td>
+                  <td className="px-2 py-3 text-right">{formatMetricValue(row.plan, row.type)}</td>
+                  <td className="px-2 py-3 text-right font-semibold text-slate-950">{formatMetricValue(row.actual, row.type)}</td>
+                  <td className="px-2 py-3 text-right">{formatMetricValue(row.previous, row.type)}</td>
+                  <td className="px-2 py-3 text-right">{financialDelta(row.actual, row.previous, row.type)}</td>
+                  <td className="px-2 py-3 text-right">{financialDelta(row.actual, row.plan, row.type)}</td>
+                  <td className="px-2 py-3 text-right">{formatMetricValue(row.avg, row.type)}</td>
+                  <td className="px-2 py-3 text-right">{formatMetricValue(row.planAvg, row.type)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <Panel title="Country-level financial performance" exportSplit>
+        <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          Country rows use CRM leads created in {activeMonth.label}. Sales/revenue/cost are estimated by lead share unless CRM deal value is filled. Use this as directional country analytics, not perfect attribution.
+        </div>
+        <div className="pdf-ignore mb-4 flex flex-wrap gap-2">
+          <select
+            value={selectedCountry}
+            onChange={(event) => setSelectedCountry(event.target.value)}
+            className="h-10 max-w-64 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-800"
+          >
+            <option value="">All countries</option>
+            {countryOptions.map((country) => (
+              <option key={country} value={country}>{country}</option>
+            ))}
+          </select>
+          <select
+            value={selectedCountryService}
+            onChange={(event) => setSelectedCountryService(event.target.value)}
+            className="h-10 max-w-80 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-800"
+          >
+            <option value="">All service directions</option>
+            {countryServiceOptions.map((service) => (
+              <option key={service} value={service}>{service}</option>
+            ))}
+          </select>
+        </div>
+        <div className="overflow-hidden">
+          <table className="w-full table-fixed text-xs lg:text-sm">
+            <colgroup>
+              <col className="w-[11%]" />
+              <col className="w-[13%]" />
+              {Array.from({ length: 10 }).map((_, index) => <col key={index} />)}
+              <col className="w-[16%]" />
+            </colgroup>
+            <thead>
+              <tr className="border-b border-slate-200 text-left text-[11px] uppercase leading-tight text-slate-500">
+                <th className="px-1 py-3">Country</th>
+                <th className="px-1 py-3">Service direction</th>
+                <th className="px-1 py-3 text-right">Leads</th>
+                <th className="px-1 py-3 text-right">Qualified</th>
+                <th className="px-1 py-3 text-right">Signed</th>
+                <th className="px-1 py-3 text-right">Sales value</th>
+                <th className="px-1 py-3 text-right">Revenue</th>
+                <th className="px-1 py-3 text-right">Mkt. cost</th>
+                <th className="px-1 py-3 text-right">Paid cost</th>
+                <th className="px-1 py-3 text-right">CPL</th>
+                <th className="px-1 py-3 text-right">CPQL</th>
+                <th className="px-1 py-3 text-right">Cost / contract</th>
+                <th className="px-1 py-3 text-right">Conv.</th>
+                <th className="px-1 py-3">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {countryRows.map((row) => (
+                <tr key={`${row.country}-${row.service}`} className="border-b border-slate-100">
+                  <td className="break-words px-1 py-3 font-medium text-slate-950">{row.country}</td>
+                  <td className="break-words px-1 py-3 text-slate-700">{row.service}</td>
+                  <td className="px-1 py-3 text-right">{formatNumber(row.leads)}</td>
+                  <td className="px-1 py-3 text-right">{formatNumber(row.qualified)}</td>
+                  <td className="px-1 py-3 text-right font-medium text-slate-950">{formatNumber(row.signedContracts)}</td>
+                  <td className="px-1 py-3 text-right">{formatCurrency(row.salesValue)}</td>
+                  <td className="px-1 py-3 text-right">{formatCurrency(row.estimatedRevenue)}</td>
+                  <td className="px-1 py-3 text-right">{formatCurrency(row.estimatedCost)}</td>
+                  <td className="px-1 py-3 text-right">{formatCurrency(row.estimatedPaidTrafficCost)}</td>
+                  <td className="px-1 py-3 text-right">{formatCurrency(row.cpl)}</td>
+                  <td className="px-1 py-3 text-right">{formatCurrency(row.cpql)}</td>
+                  <td className="px-1 py-3 text-right">{formatCurrency(row.costPerContract)}</td>
+                  <td className="px-1 py-3 text-right">{formatPercent(row.conversionRate)}</td>
+                  <td className="break-words px-1 py-3 text-slate-600">{row.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 function Quality({ analytics }: { analytics: Analytics }) {
   const fieldGroups: Array<Analytics["fieldCoverage"][number]["group"]> = [
     "Used directly in analytics",
@@ -1187,8 +1604,8 @@ export default function Home() {
   const [records, setRecords] = useState<CRMRecord[]>([]);
   const [financeData, setFinanceData] = useState<FinanceData | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
-  const [fileName, setFileName] = useState("Works with clients sample");
-  const [financeFileName, setFinanceFileName] = useState("Marketing-Finance sample");
+  const [fileName, setFileName] = useState("Works with clients 3 sample");
+  const [financeFileName, setFinanceFileName] = useState("DC-Finance-march-2026 sample");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
@@ -1205,8 +1622,8 @@ export default function Home() {
 
     async function loadSample() {
       try {
-        const savedCrm = await loadReportFile("crm").catch(() => null);
-        const savedFinance = await loadReportFile("finance").catch(() => null);
+        const savedCrm = await loadReportFile(CRM_FILE_KEY).catch(() => null);
+        const savedFinance = await loadReportFile(FINANCE_FILE_KEY).catch(() => null);
         let crmBuffer: ArrayBuffer;
         if (savedCrm?.buffer) {
           crmBuffer = savedCrm.buffer;
@@ -1285,6 +1702,31 @@ export default function Home() {
 
   const analytics = useMemo(() => buildAnalytics(filteredRecords, filteredFinance), [filteredFinance, filteredRecords]);
   const activeTab = tabs.find((item) => item.id === tab) ?? tabs[0];
+  const fullDateBounds = useMemo(() => getDateBounds(records), [records]);
+  const selectedServiceNames = selectedServices.length && selectedServices.length !== serviceOptions.length
+    ? selectedServices
+    : [];
+  const dateFilterActive = Boolean(records.length && (dateRange.from !== fullDateBounds.from || dateRange.to !== fullDateBounds.to));
+  const serviceFilterActive = selectedServiceNames.length > 0;
+  const hasActiveFilters = dateFilterActive || uniqueOnly || serviceFilterActive;
+  const filterDescription = [
+    dateFilterActive ? `Date range: ${dateRange.from || "start"} to ${dateRange.to || "end"}.` : "",
+    uniqueOnly ? "Unique leads only is enabled." : "",
+    serviceFilterActive ? `Service filter: ${selectedServiceNames.join(", ")}.` : "",
+  ].filter(Boolean).join(" ");
+  const reportScope: ReportScope = {
+    rawTotal: records.length,
+    dateAndQualityTotal: dateAndQualityFilteredRecords.length,
+    visibleTotal: filteredRecords.length,
+    hasActiveFilters,
+    filterDescription,
+  };
+
+  function resetAllFilters() {
+    setDateRange(fullDateBounds);
+    setUniqueOnly(false);
+    setSelectedServices([]);
+  }
 
   async function handleFile(file: File) {
     setError("");
@@ -1294,8 +1736,10 @@ export default function Home() {
       const parsed = await parseWorkbook(buffer);
       setRecords(parsed);
       setDateRange(getDateBounds(parsed));
+      setUniqueOnly(false);
+      setSelectedServices([]);
       setFileName(file.name);
-      await saveReportFile("crm", file.name, buffer.slice(0));
+      await saveReportFile(CRM_FILE_KEY, file.name, buffer.slice(0));
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Could not parse the selected XLSX file");
     } finally {
@@ -1311,7 +1755,7 @@ export default function Home() {
       const parsed = await parseFinanceWorkbook(buffer);
       setFinanceData(parsed);
       setFinanceFileName(file.name);
-      await saveReportFile("finance", file.name, buffer.slice(0));
+      await saveReportFile(FINANCE_FILE_KEY, file.name, buffer.slice(0));
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Could not parse the selected finance XLSX file");
     } finally {
@@ -1514,6 +1958,19 @@ export default function Home() {
               </button>
               <button
                 type="button"
+                onClick={resetAllFilters}
+                className={clsx(
+                  "inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold transition",
+                  hasActiveFilters
+                    ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+                    : "border-slate-300 bg-white text-slate-500 hover:bg-slate-50",
+                )}
+                title="Reset date, unique, and service filters"
+              >
+                Reset all filters
+              </button>
+              <button
+                type="button"
                 onClick={() => setUniqueOnly((current) => !current)}
                 className={clsx(
                   "inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold transition",
@@ -1585,6 +2042,16 @@ export default function Home() {
               <Download className="h-4 w-4" />
               {isExporting ? "Exporting..." : "Export PDF"}
             </button>
+            <form action="/api/logout" method="post">
+              <button
+                type="submit"
+                className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                title="Sign out"
+              >
+                <LogOut className="h-4 w-4" />
+                Logout
+              </button>
+            </form>
             </div>
           </div>
         </div>
@@ -1639,10 +2106,11 @@ export default function Home() {
             {isExporting ? "Exporting..." : "Export this page to PDF"}
           </button>
         </div>
-        {tab === "overview" ? <Overview analytics={analytics} /> : null}
-        {tab === "sources" ? <Sources analytics={analytics} /> : null}
+        {tab === "overview" ? <Overview analytics={analytics} scope={reportScope} onResetFilters={resetAllFilters} /> : null}
+        {tab === "sources" ? <Sources analytics={analytics} scope={reportScope} onResetFilters={resetAllFilters} /> : null}
         {tab === "conversion" ? <Conversion analytics={analytics} /> : null}
         {tab === "cohorts" ? <Cohorts analytics={analytics} /> : null}
+        {tab === "financial" ? <FinancialReport analytics={analytics} records={filteredRecords} financeData={financeData} /> : null}
         {tab === "quality" ? <Quality analytics={analytics} /> : null}
       </section>
 
@@ -1650,12 +2118,12 @@ export default function Home() {
         <div ref={exportRef} className="export-report">
           {exportMode === "all" || tab === "overview" ? (
             <ReportPage title="Overview">
-              <Overview analytics={analytics} />
+              <Overview analytics={analytics} scope={reportScope} />
             </ReportPage>
           ) : null}
           {exportMode === "all" || tab === "sources" ? (
             <ReportPage title="Channels & services">
-              <Sources analytics={analytics} />
+              <Sources analytics={analytics} scope={reportScope} />
             </ReportPage>
           ) : null}
           {exportMode === "all" || tab === "conversion" ? (
@@ -1666,6 +2134,11 @@ export default function Home() {
           {exportMode === "all" || tab === "cohorts" ? (
             <ReportPage title="Cohorts">
               <Cohorts analytics={analytics} />
+            </ReportPage>
+          ) : null}
+          {exportMode === "all" || tab === "financial" ? (
+            <ReportPage title="Financial funnel">
+              <FinancialReport analytics={analytics} records={filteredRecords} financeData={financeData} />
             </ReportPage>
           ) : null}
           {exportMode === "all" || tab === "quality" ? (

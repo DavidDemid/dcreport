@@ -63,7 +63,27 @@ export type MonthlyRow = {
   revenue: number;
   profitAfterMarketing: number;
   signedContracts: number;
+  financeLeads: number;
+  clicks: number;
+  paidTrafficCost: number;
+  sales: number;
+  planProfitAfterMarketing: number;
+  planProfitAfterMarketing3MonthAverage: number;
+  avgProfitAfterMarketing: number;
+  avgRevenue: number;
+  avgSales: number;
+  avgMarketingCost: number;
+  avgPaidTrafficCost: number;
+  avgSignedContracts: number;
+  avgLeads: number;
+  avgClicks: number;
+  ltContracts: number;
+  lvContracts: number;
+  rbiContracts: number;
   cpl: number | null;
+  paidTrafficCpl: number | null;
+  costPerSignedContract: number | null;
+  leadToContractRate: number | null;
   cac: number | null;
   roas: number | null;
   marketingCostShare: number | null;
@@ -377,14 +397,85 @@ function serviceChannelRows(records: CRMRecord[], finance?: FinanceData): Servic
     .sort((a, b) => a.service.localeCompare(b.service) || b.leads - a.leads);
 }
 
-function financeMonthlyMap(finance?: FinanceData): Map<string, { revenue: number; marketingSpend: number; profitAfterMarketing: number; signedContracts: number }> {
-  const map = new Map<string, { revenue: number; marketingSpend: number; profitAfterMarketing: number; signedContracts: number }>();
+function financeMonthlyMap(finance?: FinanceData): Map<string, MonthlyRow> {
+  const map = new Map<string, MonthlyRow>();
   for (const record of finance?.monthly ?? []) {
-    const current = map.get(record.month) ?? { revenue: 0, marketingSpend: 0, profitAfterMarketing: 0, signedContracts: 0 };
+    const current = map.get(record.month) ?? {
+      month: record.month,
+      label: monthLabel(record.month),
+      leads: 0,
+      relevantStrict: 0,
+      relevantStrictRate: 0,
+      qualifiedActive: 0,
+      qualifiedActiveRate: 0,
+      rejected: 0,
+      rejectionRate: 0,
+      inWork: 0,
+      agreementSent: 0,
+      agreementSentRate: 0,
+      agreementSigned: 0,
+      agreementSignedRate: 0,
+      clients: 0,
+      clientRate: 0,
+      fullPaidClients: 0,
+      fullPaidClientRate: 0,
+      completed: 0,
+      marketingSpend: 0,
+      revenue: 0,
+      profitAfterMarketing: 0,
+      signedContracts: 0,
+      financeLeads: 0,
+      clicks: 0,
+      paidTrafficCost: 0,
+      sales: 0,
+      planProfitAfterMarketing: 0,
+      planProfitAfterMarketing3MonthAverage: 0,
+      avgProfitAfterMarketing: 0,
+      avgRevenue: 0,
+      avgSales: 0,
+      avgMarketingCost: 0,
+      avgPaidTrafficCost: 0,
+      avgSignedContracts: 0,
+      avgLeads: 0,
+      avgClicks: 0,
+      ltContracts: 0,
+      lvContracts: 0,
+      rbiContracts: 0,
+      cpl: null,
+      paidTrafficCpl: null,
+      costPerSignedContract: null,
+      leadToContractRate: null,
+      cac: null,
+      roas: null,
+      marketingCostShare: null,
+    };
     current.revenue += record.revenue;
     current.marketingSpend += record.marketingCost;
     current.profitAfterMarketing += record.profitAfterMarketing;
     current.signedContracts += record.signedContracts;
+    current.financeLeads += record.leads ?? 0;
+    current.clicks += record.clicks ?? 0;
+    current.paidTrafficCost += record.paidTrafficCost ?? 0;
+    current.sales += record.sales ?? 0;
+    current.planProfitAfterMarketing += record.planProfitAfterMarketing ?? 0;
+    current.planProfitAfterMarketing3MonthAverage += record.planProfitAfterMarketing3MonthAverage ?? 0;
+    current.avgProfitAfterMarketing += record.avgProfitAfterMarketing ?? 0;
+    current.avgRevenue += record.avgRevenue ?? 0;
+    current.avgSales += record.avgSales ?? 0;
+    current.avgMarketingCost += record.avgMarketingCost ?? 0;
+    current.avgPaidTrafficCost += record.avgPaidTrafficCost ?? 0;
+    current.avgSignedContracts += record.avgSignedContracts ?? 0;
+    current.avgLeads += record.avgLeads ?? 0;
+    current.avgClicks += record.avgClicks ?? 0;
+    current.ltContracts += record.ltContracts ?? 0;
+    current.lvContracts += record.lvContracts ?? 0;
+    current.rbiContracts += record.rbiContracts ?? 0;
+    current.cpl = ratio(current.marketingSpend, current.financeLeads);
+    current.paidTrafficCpl = ratio(current.paidTrafficCost, current.financeLeads);
+    current.costPerSignedContract = ratio(current.marketingSpend, current.signedContracts);
+    current.leadToContractRate = ratio(current.signedContracts, current.financeLeads);
+    current.roas = ratio(current.revenue, current.marketingSpend);
+    current.marketingCostShare = ratio(current.marketingSpend, current.revenue);
     map.set(record.month, current);
   }
   return map;
@@ -399,10 +490,15 @@ function monthlyRows(records: CRMRecord[], finance?: FinanceData): MonthlyRow[] 
 
   const financeByMonth = financeMonthlyMap(finance);
 
-  return [...grouped.entries()]
-    .filter(([key]) => key !== "Unknown")
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([month, group]) => {
+  const months = new Set<string>([
+    ...[...grouped.keys()].filter((key) => key !== "Unknown"),
+    ...financeByMonth.keys(),
+  ]);
+
+  return [...months]
+    .sort((a, b) => a.localeCompare(b))
+    .map((month) => {
+      const group = grouped.get(month) ?? [];
       const leads = group.length;
       const relevantStrict = group.filter(isRelevantStrict).length;
       const qualifiedActive = group.filter(isQualifiedActive).length;
@@ -411,7 +507,7 @@ function monthlyRows(records: CRMRecord[], finance?: FinanceData): MonthlyRow[] 
       const agreementSigned = group.filter(hasAgreementSigned).length;
       const clients = group.filter(isClient).length;
       const fullPaidClients = group.filter(isFullPaidClient).length;
-      const financeMonth = financeByMonth.get(month) ?? { revenue: 0, marketingSpend: 0, profitAfterMarketing: 0, signedContracts: 0 };
+      const financeMonth = financeByMonth.get(month);
 
       return {
         month,
@@ -433,14 +529,34 @@ function monthlyRows(records: CRMRecord[], finance?: FinanceData): MonthlyRow[] 
         fullPaidClients,
         fullPaidClientRate: pct(fullPaidClients, leads),
         completed: group.filter((record) => status(record) === "ЗАВЕРШЕНЕ" || Boolean(record.completedAt)).length,
-        marketingSpend: financeMonth.marketingSpend,
-        revenue: financeMonth.revenue,
-        profitAfterMarketing: financeMonth.profitAfterMarketing,
-        signedContracts: financeMonth.signedContracts,
-        cpl: ratio(financeMonth.marketingSpend, leads),
-        cac: ratio(financeMonth.marketingSpend, clients),
-        roas: ratio(financeMonth.revenue, financeMonth.marketingSpend),
-        marketingCostShare: ratio(financeMonth.marketingSpend, financeMonth.revenue),
+        marketingSpend: financeMonth?.marketingSpend ?? 0,
+        revenue: financeMonth?.revenue ?? 0,
+        profitAfterMarketing: financeMonth?.profitAfterMarketing ?? 0,
+        signedContracts: financeMonth?.signedContracts ?? 0,
+        financeLeads: financeMonth?.financeLeads ?? 0,
+        clicks: financeMonth?.clicks ?? 0,
+        paidTrafficCost: financeMonth?.paidTrafficCost ?? 0,
+        sales: financeMonth?.sales ?? 0,
+        planProfitAfterMarketing: financeMonth?.planProfitAfterMarketing ?? 0,
+        planProfitAfterMarketing3MonthAverage: financeMonth?.planProfitAfterMarketing3MonthAverage ?? 0,
+        avgProfitAfterMarketing: financeMonth?.avgProfitAfterMarketing ?? 0,
+        avgRevenue: financeMonth?.avgRevenue ?? 0,
+        avgSales: financeMonth?.avgSales ?? 0,
+        avgMarketingCost: financeMonth?.avgMarketingCost ?? 0,
+        avgPaidTrafficCost: financeMonth?.avgPaidTrafficCost ?? 0,
+        avgSignedContracts: financeMonth?.avgSignedContracts ?? 0,
+        avgLeads: financeMonth?.avgLeads ?? 0,
+        avgClicks: financeMonth?.avgClicks ?? 0,
+        ltContracts: financeMonth?.ltContracts ?? 0,
+        lvContracts: financeMonth?.lvContracts ?? 0,
+        rbiContracts: financeMonth?.rbiContracts ?? 0,
+        cpl: ratio(financeMonth?.marketingSpend ?? 0, financeMonth?.financeLeads || leads),
+        paidTrafficCpl: ratio(financeMonth?.paidTrafficCost ?? 0, financeMonth?.financeLeads || leads),
+        costPerSignedContract: ratio(financeMonth?.marketingSpend ?? 0, financeMonth?.signedContracts ?? 0),
+        leadToContractRate: ratio(financeMonth?.signedContracts ?? 0, financeMonth?.financeLeads || leads),
+        cac: ratio(financeMonth?.marketingSpend ?? 0, clients),
+        roas: ratio(financeMonth?.revenue ?? 0, financeMonth?.marketingSpend ?? 0),
+        marketingCostShare: ratio(financeMonth?.marketingSpend ?? 0, financeMonth?.revenue ?? 0),
       };
     });
 }
@@ -633,6 +749,8 @@ function financeSummary(finance: FinanceData | undefined, leads: number, qualifi
   const marketingSpend = monthly.reduce((sum, record) => sum + record.marketingCost, 0);
   const profitAfterMarketing = monthly.reduce((sum, record) => sum + record.profitAfterMarketing, 0);
   const signedContracts = monthly.reduce((sum, record) => sum + record.signedContracts, 0);
+  const clicks = monthly.reduce((sum, record) => sum + (record.clicks ?? 0), 0);
+  const paidTrafficCost = monthly.reduce((sum, record) => sum + (record.paidTrafficCost ?? 0), 0);
 
   return {
     hasFinanceData: monthly.length > 0 || (finance?.channelCosts.length ?? 0) > 0,
@@ -646,7 +764,7 @@ function financeSummary(finance: FinanceData | undefined, leads: number, qualifi
     cpql: ratio(marketingSpend, qualifiedActive),
     cac: ratio(marketingSpend, clients),
     costPerSignedContract: ratio(marketingSpend, signedContracts),
-    cpc: null,
+    cpc: ratio(paidTrafficCost || marketingSpend, clicks),
   };
 }
 
