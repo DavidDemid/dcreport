@@ -157,6 +157,8 @@ export type Analytics = {
   duplicateRate: number;
   agreementSentRate: number;
   agreementSignedRate: number;
+  crmSignedSalesValue: number;
+  crmSignedSalesCoverage: number;
   clientRate: number;
   fullPaidClientRate: number;
   fieldImplementationRate: number;
@@ -215,15 +217,18 @@ export function isDuplicate(record: CRMRecord): boolean {
 }
 
 function duplicateIdentityCount(records: CRMRecord[]): number {
-  const seen = new Set<string>();
+  const seen = new Map<string, number>();
   let duplicates = 0;
-  for (const record of records) {
-    const key = leadIdentityKey(record);
-    if (isDuplicate(record) || seen.has(key)) {
+  const sorted = [...records].sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0) || a.rowNumber - b.rowNumber);
+  for (const record of sorted) {
+    const key = `${leadIdentityKey(record)}|||${record.reportingService}`;
+    const currentTime = record.createdAt?.getTime() ?? 0;
+    const previousTime = seen.get(key);
+    if (isDuplicate(record) || (previousTime !== undefined && currentTime && currentTime - previousTime <= 30 * 24 * 60 * 60 * 1000)) {
       duplicates += 1;
       continue;
     }
-    seen.add(key);
+    seen.set(key, currentTime);
   }
   return duplicates;
 }
@@ -849,6 +854,11 @@ export function buildAnalytics(records: CRMRecord[], finance?: FinanceData): Ana
   const rejected = records.filter(isRejected).length;
   const agreementSent = records.filter(hasAgreementSent).length;
   const agreementSigned = records.filter(hasAgreementSigned).length;
+  const signedWithDealValue = records.filter((record) => hasAgreementSigned(record) && (record.dealValueActual ?? 0) > 0).length;
+  const crmSignedSalesValue = records.reduce((sum, record) => {
+    if (!hasAgreementSigned(record)) return sum;
+    return sum + (record.dealValueActual ?? 0);
+  }, 0);
   const clients = records.filter(isClient).length;
   const fullPaidClients = records.filter(isFullPaidClient).length;
   const coverage = fieldCoverage(records);
@@ -870,6 +880,8 @@ export function buildAnalytics(records: CRMRecord[], finance?: FinanceData): Ana
     duplicateRate: pct(duplicates, total),
     agreementSentRate: pct(agreementSent, total),
     agreementSignedRate: pct(agreementSigned, total),
+    crmSignedSalesValue,
+    crmSignedSalesCoverage: pct(signedWithDealValue, agreementSigned),
     clientRate: pct(clients, total),
     fullPaidClientRate: pct(fullPaidClients, total),
     fieldImplementationRate: pct(implementedFields, coverage.length),

@@ -38,7 +38,7 @@ import {
   hasAgreementSigned,
   isQualifiedActive,
 } from "@/lib/analytics";
-import { CRMRecord, leadIdentityKey, monthKey, parseWorkbook } from "@/lib/crm";
+import { cleanLeadRecords, CRMRecord, LeadCleanupResult, monthKey, parseWorkbook } from "@/lib/crm";
 import { FinanceChannelCostRecord, FinanceData, parseFinanceWorkbook } from "@/lib/finance";
 
 type Tab = "overview" | "sources" | "conversion" | "cohorts" | "financial" | "quality";
@@ -86,6 +86,9 @@ const panelHelp: Record<string, string> = {
   "Cohort conversion trend": "Compares cohort quality: active-qualified rate, current paid proxy, paid with date by M5, and rejected rate.",
   "Financial monthly table": "Compares selected month actuals against plan, previous month, and 3-month averages from the finance workbook.",
   "Financial funnel": "Shows the monthly funnel from clicks to leads, signed contracts, sales, revenue, and profit after marketing.",
+  "Lead chart": "Compares raw CRM-created records, clean CRM leads after cleanup, and finance-file lead totals by month.",
+  "Money chart": "Separates large money metrics from lead counts: sales value, revenue, marketing cost, and profit after marketing.",
+  "Contracts chart": "Tracks signed contracts and the available split by Lithuania, Latvia, and RBI/residence contracts from the finance file.",
   "Country-level financial performance": "Country and service rows for the selected month, using CRM leads and estimated marketing cost by lead share.",
   "Field completeness": "Shows how often important CRM fields are filled and whether metrics still depend on status proxies.",
 };
@@ -435,6 +438,8 @@ function ServiceFilter({
 
 type ReportScope = {
   rawTotal: number;
+  rawDateTotal: number;
+  cleanTotal: number;
   dateAndQualityTotal: number;
   visibleTotal: number;
   hasActiveFilters: boolean;
@@ -450,7 +455,7 @@ function FilterSummary({ scope, onReset }: { scope: ReportScope; onReset?: () =>
         <div>
           <div className="font-semibold">Filtered view is active</div>
           <div className="mt-1 text-amber-800">
-            Showing {formatNumber(scope.visibleTotal)} rows in the current report view. Date/unique filters leave {formatNumber(scope.dateAndQualityTotal)} rows from {formatNumber(scope.rawTotal)} rows in the full CRM file. {scope.filterDescription}
+            Showing {formatNumber(scope.visibleTotal)} rows in the current report view. Selected period has {formatNumber(scope.rawDateTotal)} CRM-created records and {formatNumber(scope.cleanTotal)} clean leads from {formatNumber(scope.rawTotal)} rows in the full CRM file. {scope.filterDescription}
           </div>
         </div>
         {onReset ? (
@@ -886,7 +891,13 @@ function Conversion({ analytics }: { analytics: Analytics }) {
         <KpiCard label="CPQL" value={formatCurrency(analytics.finance.cpql)} sub="Marketing spend / qualified-active leads" help="Average marketing spend per qualified or active-proxy lead." />
         <KpiCard label="CAC" value={formatCurrency(analytics.finance.cac)} sub="Marketing spend / clients" help="Average marketing spend per first-payment client." tone="amber" />
         <KpiCard label="Cost per signed contract" value={formatCurrency(analytics.finance.costPerSignedContract)} sub="Finance signed contracts" help="Marketing spend divided by signed contracts from the finance report." tone="green" />
-        <KpiCard label="CPC" value="n/a" sub="No clicks column in finance report" help="CPC needs clicks. The current finance XLS contains costs, revenue, and contracts, but no clicks." />
+        <KpiCard
+          label="CRM signed value"
+          value={analytics.crmSignedSalesValue ? formatCurrency(analytics.crmSignedSalesValue) : "n/a"}
+          sub={analytics.crmSignedSalesValue ? `${formatPercent(analytics.crmSignedSalesCoverage)} signed rows covered` : "deal_value_actual is empty"}
+          help="Potential CRM Sales: sum of deal_value_actual for rows that reached agreement signed. Current export does not fill this field, so finance Sales remains the reliable signed-contract value."
+          tone={analytics.crmSignedSalesValue ? "green" : "amber"}
+        />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-2">
@@ -1220,8 +1231,15 @@ function countryNote(leads: number, qualified: number, signedContracts: number, 
   return "Monitor.";
 }
 
-function countryFinancialRows(records: CRMRecord[], month: string, marketingCost: number, paidTrafficCost: number, revenue: number, sales: number) {
-  const monthRecords = records.filter((record) => monthKey(record.createdAt) === month);
+function countryFinancialRows(rawRecords: CRMRecord[], cleanRecords: CRMRecord[], month: string, marketingCost: number, paidTrafficCost: number, revenue: number, sales: number, financeSignedContracts: number) {
+  const rawMonthRecords = rawRecords.filter((record) => monthKey(record.createdAt) === month);
+  const monthRecords = cleanRecords.filter((record) => monthKey(record.createdAt) === month);
+  const rawGrouped = new Map<string, CRMRecord[]>();
+  for (const record of rawMonthRecords) {
+    const country = record.country || "Unknown";
+    const key = `${country}|||${record.reportingService}`;
+    rawGrouped.set(key, [...(rawGrouped.get(key) ?? []), record]);
+  }
   const grouped = new Map<string, CRMRecord[]>();
   for (const record of monthRecords) {
     const country = record.country || "Unknown";
@@ -1233,23 +1251,27 @@ function countryFinancialRows(records: CRMRecord[], month: string, marketingCost
     .map(([key, group]) => {
       const [country, service] = key.split("|||");
       const leads = group.length;
+      const rawLeads = rawGrouped.get(key)?.length ?? leads;
       const qualified = group.filter(isQualifiedActive).length;
-      const signedContracts = group.filter(hasAgreementSigned).length;
+      const crmSignedProxy = group.filter(hasAgreementSigned).length;
       const crmSalesValue = group.reduce((sum, record) => sum + (record.dealValueActual ?? 0), 0);
       const share = monthRecords.length ? leads / monthRecords.length : 0;
       const estimatedCost = marketingCost * share;
       const estimatedPaidTrafficCost = paidTrafficCost * share;
       const estimatedRevenue = revenue * share;
       const estimatedSales = sales * share;
+      const signedContracts = financeSignedContracts * share;
       const salesValue = crmSalesValue || estimatedSales;
       const conversionRate = leads ? signedContracts / leads : 0;
       const cpl = estimatedCost && leads ? estimatedCost / leads : null;
       return {
         country,
         service,
+        rawLeads,
         leads,
         qualified,
         signedContracts,
+        crmSignedProxy,
         salesValue,
         estimatedRevenue,
         estimatedCost,
@@ -1265,7 +1287,19 @@ function countryFinancialRows(records: CRMRecord[], month: string, marketingCost
     .sort((a, b) => b.leads - a.leads);
 }
 
-function FinancialReport({ analytics, records, financeData }: { analytics: Analytics; records: CRMRecord[]; financeData: FinanceData | null }) {
+function FinancialReport({
+  analytics,
+  records,
+  rawRecords,
+  cleanupResult,
+  financeData,
+}: {
+  analytics: Analytics;
+  records: CRMRecord[];
+  rawRecords: CRMRecord[];
+  cleanupResult: LeadCleanupResult;
+  financeData: FinanceData | null;
+}) {
   const financialAnalytics = useMemo(
     () => (financeData ? buildAnalytics(records, financeData) : analytics),
     [analytics, financeData, records],
@@ -1276,13 +1310,49 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
   const [selectedMonth, setSelectedMonth] = useState(months[0]?.month ?? "");
   const [selectedCountry, setSelectedCountry] = useState("");
   const [selectedCountryService, setSelectedCountryService] = useState("");
+  const [selectedCountrySource, setSelectedCountrySource] = useState("");
   const activeMonth = months.find((row) => row.month === selectedMonth) ?? months[0];
   const previousMonth = activeMonth ? months.find((row) => row.month < activeMonth.month) : undefined;
+  const rawMonthlyCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const record of rawRecords) {
+      const key = monthKey(record.createdAt);
+      if (key === "Unknown") continue;
+      map.set(key, (map.get(key) ?? 0) + 1);
+    }
+    return map;
+  }, [rawRecords]);
+  const sourceFilteredCleanRecords = activeMonth && selectedCountrySource
+    ? records.filter((record) => monthKey(record.createdAt) !== activeMonth.month || record.source === selectedCountrySource)
+    : records;
+  const sourceFilteredRawRecords = activeMonth && selectedCountrySource
+    ? rawRecords.filter((record) => monthKey(record.createdAt) !== activeMonth.month || record.source === selectedCountrySource)
+    : rawRecords;
+  const activeCleanMonthRecords = activeMonth ? records.filter((record) => monthKey(record.createdAt) === activeMonth.month) : [];
+  const sourceCleanMonthRecords = activeMonth && selectedCountrySource
+    ? activeCleanMonthRecords.filter((record) => record.source === selectedCountrySource)
+    : activeCleanMonthRecords;
+  const countryFinanceShare = activeCleanMonthRecords.length ? sourceCleanMonthRecords.length / activeCleanMonthRecords.length : 1;
   const countryRowsBase = activeMonth
-    ? countryFinancialRows(records, activeMonth.month, activeMonth.marketingSpend, activeMonth.paidTrafficCost, activeMonth.revenue, activeMonth.sales)
+    ? countryFinancialRows(
+      sourceFilteredRawRecords,
+      sourceFilteredCleanRecords,
+      activeMonth.month,
+      activeMonth.marketingSpend * countryFinanceShare,
+      activeMonth.paidTrafficCost * countryFinanceShare,
+      activeMonth.revenue * countryFinanceShare,
+      activeMonth.sales * countryFinanceShare,
+      activeMonth.signedContracts * countryFinanceShare,
+    )
     : [];
   const countryOptions = [...new Set(countryRowsBase.map((row) => row.country))].sort((a, b) => a.localeCompare(b));
   const countryServiceOptions = [...new Set(countryRowsBase.map((row) => row.service))].sort((a, b) => a.localeCompare(b));
+  const countrySourceOptions = useMemo(
+    () => (activeMonth
+      ? [...new Set(records.filter((record) => monthKey(record.createdAt) === activeMonth.month).map((record) => record.source))].sort((a, b) => a.localeCompare(b))
+      : []),
+    [activeMonth, records],
+  );
   const countryRows = countryRowsBase
     .filter((row) => !selectedCountry || row.country === selectedCountry)
     .filter((row) => !selectedCountryService || row.service === selectedCountryService)
@@ -1297,7 +1367,8 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
   useEffect(() => {
     if (selectedCountry && !countryOptions.includes(selectedCountry)) setSelectedCountry("");
     if (selectedCountryService && !countryServiceOptions.includes(selectedCountryService)) setSelectedCountryService("");
-  }, [countryOptions, countryServiceOptions, selectedCountry, selectedCountryService]);
+    if (selectedCountrySource && !countrySourceOptions.includes(selectedCountrySource)) setSelectedCountrySource("");
+  }, [countryOptions, countryServiceOptions, countrySourceOptions, selectedCountry, selectedCountryService, selectedCountrySource]);
 
   if (!activeMonth) {
     return (
@@ -1310,21 +1381,30 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
   }
 
   const financeLeads = activeMonth.financeLeads;
-  const crmCreatedLeads = activeMonth.leads;
-  const leadBase = financeLeads || crmCreatedLeads;
+  const cleanLeads = activeMonth.leads;
+  const crmCreatedLeads = rawMonthlyCounts.get(activeMonth.month) ?? cleanLeads;
+  const previousCleanLeads = previousMonth?.leads ?? 0;
   const previousFinanceLeads = previousMonth?.financeLeads ?? 0;
-  const previousCrmCreatedLeads = previousMonth?.leads ?? 0;
-  const previousLeadBase = previousFinanceLeads || previousCrmCreatedLeads;
-  const leadCountMismatch = Boolean(financeLeads && crmCreatedLeads && financeLeads !== crmCreatedLeads);
-  const cpl = activeMonth.cpl ?? (leadBase ? activeMonth.marketingSpend / leadBase : null);
+  const previousCrmCreatedLeads = previousMonth ? rawMonthlyCounts.get(previousMonth.month) ?? previousCleanLeads : 0;
+  const previousLeadBase = previousCleanLeads || previousFinanceLeads || previousCrmCreatedLeads;
+  const leadCountMismatch = Boolean(financeLeads && cleanLeads && Math.abs(financeLeads - cleanLeads) / financeLeads > 0.05);
+  const cpl = cleanLeads ? activeMonth.marketingSpend / cleanLeads : null;
   const costPerContract = activeMonth.costPerSignedContract ?? (activeMonth.signedContracts ? activeMonth.marketingSpend / activeMonth.signedContracts : null);
-  const leadToContract = activeMonth.leadToContractRate ?? (leadBase ? activeMonth.signedContracts / leadBase : null);
-  const clickToLead = activeMonth.clicks ? leadBase / activeMonth.clicks : null;
+  const paidTrafficCpl = cleanLeads ? activeMonth.paidTrafficCost / cleanLeads : null;
+  const leadToContract = cleanLeads ? activeMonth.signedContracts / cleanLeads : null;
+  const clickToLead = activeMonth.clicks ? cleanLeads / activeMonth.clicks : null;
   const salesToRevenue = activeMonth.sales ? activeMonth.revenue / activeMonth.sales : null;
+  const financialTrendRows = trendRows.map((row) => ({
+    ...row,
+    crmCreatedLeads: rawMonthlyCounts.get(row.month) ?? row.leads,
+    cleanLeads: row.leads,
+  }));
   const metricRows: FinancialMetricRow[] = [
+    { label: "Sessions", type: "number", actual: null },
     { label: "Clicks", type: "number", actual: activeMonth.clicks, avg: activeMonth.avgClicks, previous: previousMonth?.clicks },
-    { label: "Finance leads", type: "number", actual: financeLeads || null, avg: activeMonth.avgLeads, previous: previousFinanceLeads || null },
     { label: "CRM created leads", type: "number", actual: crmCreatedLeads, previous: previousCrmCreatedLeads || null },
+    { label: "Clean leads", type: "number", actual: cleanLeads, avg: activeMonth.avgLeads, previous: previousCleanLeads || null },
+    { label: "Finance leads", type: "number", actual: financeLeads || null, avg: activeMonth.avgLeads, previous: previousFinanceLeads || null },
     { label: "Signed contracts", type: "number", actual: activeMonth.signedContracts, avg: activeMonth.avgSignedContracts, previous: previousMonth?.signedContracts },
     { label: "Lithuania contracts", type: "number", actual: activeMonth.ltContracts, previous: previousMonth?.ltContracts },
     { label: "Latvia contracts", type: "number", actual: activeMonth.lvContracts, previous: previousMonth?.lvContracts },
@@ -1342,8 +1422,8 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
       avg: activeMonth.avgProfitAfterMarketing,
       previous: previousMonth?.profitAfterMarketing,
     },
-    { label: "CPL", type: "currency", actual: cpl, previous: previousMonth?.cpl },
-    { label: "Paid traffic CPL", type: "currency", actual: activeMonth.paidTrafficCpl, previous: previousMonth?.paidTrafficCpl },
+    { label: "CPL", type: "currency", actual: cpl, previous: previousCleanLeads ? (previousMonth?.marketingSpend ?? 0) / previousCleanLeads : null },
+    { label: "Paid traffic CPL", type: "currency", actual: paidTrafficCpl, previous: previousCleanLeads ? (previousMonth?.paidTrafficCost ?? 0) / previousCleanLeads : null },
     { label: "Cost per signed contract", type: "currency", actual: costPerContract, previous: previousMonth?.costPerSignedContract },
     { label: "Click to lead conversion", type: "percent", actual: clickToLead },
     { label: "Lead to contract conversion", type: "percent", actual: leadToContract, previous: previousLeadBase ? (previousMonth?.signedContracts ?? 0) / previousLeadBase : previousMonth?.leadToContractRate },
@@ -1356,7 +1436,7 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
         <div>
           <h2 className="text-lg font-semibold text-slate-950">Marketing & sales funnel</h2>
           <p className="mt-1 text-sm text-slate-600">
-            Latest available finance month: <strong>{months[0]?.label}</strong>. Finance leads come from the finance workbook; CRM created leads are counted from CRM rows by `Дата створення`.
+            Latest available finance month: <strong>{months[0]?.label}</strong>. CRM created leads are raw CRM rows by `Дата створення`; Clean leads remove duplicates and obvious technical/system records; finance leads are shown only as validation.
           </p>
         </div>
         <select
@@ -1371,9 +1451,11 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <KpiCard label="Sessions" value="n/a" sub="GA4 source not connected" help="Website sessions should come from GA4 or website analytics. The current finance file has clicks, but not sessions." />
         <KpiCard label="Clicks" value={formatNumber(activeMonth.clicks)} sub="All traffic clicks from finance" help="Total clicks from the monthly finance funnel, not only CRM rows." />
-        <KpiCard label="Finance leads" value={formatNumber(financeLeads)} sub="Main numbers monthly total" help="Lead count from the finance workbook. Use this for finance funnel CPL and plan/actual comparison." tone="blue" />
-        <KpiCard label="CRM created leads" value={formatNumber(crmCreatedLeads)} sub="CRM rows by creation date" help="Rows from the CRM export where `Дата створення` falls inside the selected month. Overview, channels, services, conversions, and cohorts use this CRM count." tone="blue" />
+        <KpiCard label="CRM created leads" value={formatNumber(crmCreatedLeads)} sub="Raw CRM rows by creation date" help="All CRM records where `Дата створення` falls in the selected month, before cleanup." tone="blue" />
+        <KpiCard label="Clean leads" value={formatNumber(cleanLeads)} sub={`${formatNumber(Math.max(0, crmCreatedLeads - cleanLeads))} removed by cleanup`} help="CRM-created records after removing duplicates and obvious technical/system/test records. This is the default lead base for management metrics." tone="green" />
+        <KpiCard label="Finance leads" value={financeLeads ? formatNumber(financeLeads) : "n/a"} sub="Finance file validation" help="Lead count from Jonas finance file, used as a comparison check, not as the default CRM funnel base." tone="blue" />
         <KpiCard label="Signed contracts" value={formatNumber(activeMonth.signedContracts)} sub={`${formatNumber(activeMonth.ltContracts)} LT · ${formatNumber(activeMonth.lvContracts)} LV · ${formatNumber(activeMonth.rbiContracts)} other/RBI`} help="Signed contracts from the finance workbook. Other/RBI is the remaining contracts after LT and LV where no separate RBI contract field exists." tone="green" />
         <KpiCard label="Sales" value={formatCurrency(activeMonth.sales)} sub="Signed contract value" help="Sales means contract value signed in the month, not cash received." tone="green" />
         <KpiCard label="Revenue" value={formatCurrency(activeMonth.revenue)} sub="Cash received" help="Actual money received from clients during the selected month." />
@@ -1383,24 +1465,28 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="CPL" value={formatCurrency(cpl)} sub="Marketing cost / leads" help="Average marketing cost per finance lead." />
-        <KpiCard label="Paid traffic CPL" value={formatCurrency(activeMonth.paidTrafficCpl)} sub="Paid traffic / leads" help="Paid traffic cost divided by finance leads." />
+        <KpiCard label="CPL" value={formatCurrency(cpl)} sub="Marketing cost / clean leads" help="Average marketing cost per clean CRM lead." />
+        <KpiCard label="Paid traffic CPL" value={formatCurrency(paidTrafficCpl)} sub="Paid traffic / clean leads" help="Paid traffic cost divided by clean CRM leads." />
         <KpiCard label="Cost per signed contract" value={formatCurrency(costPerContract)} sub="Marketing cost / contracts" help="Total marketing cost divided by signed contracts." tone="amber" />
-        <KpiCard label="Lead to contract" value={formatPercent(leadToContract ?? 0)} sub="Signed contracts / leads" help="Monthly signed contract conversion from finance leads." tone="green" />
+        <KpiCard label="Lead to contract" value={formatPercent(leadToContract ?? 0)} sub="Signed contracts / clean leads" help="Signed contracts from finance divided by clean CRM leads." tone="green" />
       </div>
 
       {leadCountMismatch ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-          Lead count audit for {activeMonth.label}: finance workbook shows <strong>{formatNumber(financeLeads)}</strong> leads, while CRM export has <strong>{formatNumber(crmCreatedLeads)}</strong> created rows by `Дата створення`.
-          Finance CPL uses finance leads; CRM pages use CRM created leads. This difference is expected when finance lead totals and CRM export rows are not the same source definition.
+          Lead count audit for {activeMonth.label}: finance workbook shows <strong>{formatNumber(financeLeads)}</strong> leads, while CRM cleanup gives <strong>{formatNumber(cleanLeads)}</strong> clean leads.
+          Difference is over 5%, so use this month as a validation checkpoint before making budget decisions.
         </div>
       ) : null}
+
+      <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
+        Cleanup rules in current date range: duplicates <strong>{formatNumber(cleanupResult.excluded.duplicate)}</strong>, technical/system <strong>{formatNumber(cleanupResult.excluded.technical)}</strong>, invalid identity <strong>{formatNumber(cleanupResult.excluded.invalid)}</strong>, test/demo <strong>{formatNumber(cleanupResult.excluded.test)}</strong>.
+      </div>
 
       <Panel title="Financial funnel">
         <div className="grid gap-3 md:grid-cols-5">
           {[
             { label: "Clicks", value: formatNumber(activeMonth.clicks), sub: clickToLead === null ? "n/a" : `${formatPercent(clickToLead)} click to lead` },
-            { label: financeLeads ? "Finance leads" : "CRM leads", value: formatNumber(leadBase), sub: leadToContract === null ? "n/a" : `${formatPercent(leadToContract)} lead to contract` },
+            { label: "Clean leads", value: formatNumber(cleanLeads), sub: leadToContract === null ? "n/a" : `${formatPercent(leadToContract)} lead to contract` },
             { label: "Signed contracts", value: formatNumber(activeMonth.signedContracts), sub: activeMonth.signedContracts ? `${formatCurrency(activeMonth.sales / activeMonth.signedContracts)} sales / contract` : "n/a" },
             { label: "Sales", value: formatCurrency(activeMonth.sales), sub: salesToRevenue === null ? "n/a" : `${formatPercent(salesToRevenue)} revenue / sales` },
             { label: "Revenue", value: formatCurrency(activeMonth.revenue), sub: `${formatCurrency(activeMonth.profitAfterMarketing)} profit after marketing` },
@@ -1414,23 +1500,54 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
         </div>
       </Panel>
 
-      <Panel title="Financial monthly trend" exportSplit>
-        <div className="h-[380px]">
+      <Panel title="Lead chart" exportSplit>
+        <div className="h-[320px]">
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={trendRows}>
+            <ComposedChart data={financialTrendRows}>
               <CartesianGrid stroke="#e2e8f0" vertical={false} />
               <XAxis dataKey="label" tick={{ fontSize: 12 }} />
-              <YAxis yAxisId="count" tick={{ fontSize: 12 }} />
-              <YAxis yAxisId="money" orientation="right" tickFormatter={(value) => `€${Math.round(Number(value) / 1000)}k`} tick={{ fontSize: 12 }} />
-              <Tooltip formatter={(value, name) => ["Sales", "Revenue", "Marketing cost", "Profit after marketing"].includes(String(name)) ? formatCurrency(numericValue(value)) : formatNumber(numericValue(value))} />
+              <YAxis tick={{ fontSize: 12 }} />
+              <Tooltip formatter={(value) => formatNumber(numericValue(value))} />
               <Legend />
-              <Bar isAnimationActive={false} yAxisId="count" dataKey="financeLeads" fill="#2563eb" name="Finance leads" radius={[3, 3, 0, 0]} />
-              <Line isAnimationActive={false} yAxisId="count" type="monotone" dataKey="leads" stroke="#0f172a" strokeWidth={2} name="CRM created leads" dot={false} />
-              <Bar isAnimationActive={false} yAxisId="count" dataKey="signedContracts" fill="#16a34a" name="Signed contracts" radius={[3, 3, 0, 0]} />
-              <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="sales" stroke="#7c3aed" strokeWidth={2} name="Sales" dot={false} />
-              <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="revenue" stroke="#0891b2" strokeWidth={2} name="Revenue" dot={false} />
-              <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="marketingSpend" stroke="#f59e0b" strokeWidth={2} name="Marketing cost" dot={false} />
-              <Line isAnimationActive={false} yAxisId="money" type="monotone" dataKey="profitAfterMarketing" stroke="#dc2626" strokeWidth={2} name="Profit after marketing" dot={false} />
+              <Bar isAnimationActive={false} dataKey="crmCreatedLeads" fill="#94a3b8" name="CRM created leads" radius={[3, 3, 0, 0]} />
+              <Bar isAnimationActive={false} dataKey="cleanLeads" fill="#2563eb" name="Clean leads" radius={[3, 3, 0, 0]} />
+              <Line isAnimationActive={false} type="monotone" dataKey="financeLeads" stroke="#16a34a" strokeWidth={2} name="Finance leads" dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </Panel>
+
+      <Panel title="Money chart" exportSplit>
+        <div className="h-[320px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={financialTrendRows}>
+              <CartesianGrid stroke="#e2e8f0" vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 12 }} />
+              <YAxis tickFormatter={(value) => `€${Math.round(Number(value) / 1000)}k`} tick={{ fontSize: 12 }} />
+              <Tooltip formatter={(value) => formatCurrency(numericValue(value))} />
+              <Legend />
+              <Line isAnimationActive={false} type="monotone" dataKey="sales" stroke="#7c3aed" strokeWidth={2} name="Sales value" dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="revenue" stroke="#0891b2" strokeWidth={2} name="Revenue" dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="marketingSpend" stroke="#f59e0b" strokeWidth={2} name="Marketing cost" dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="profitAfterMarketing" stroke="#dc2626" strokeWidth={2} name="Profit after marketing" dot={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </Panel>
+
+      <Panel title="Contracts chart" exportSplit>
+        <div className="h-[320px]">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={financialTrendRows}>
+              <CartesianGrid stroke="#e2e8f0" vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 12 }} />
+              <Tooltip formatter={(value) => formatNumber(numericValue(value))} />
+              <Legend />
+              <Bar isAnimationActive={false} dataKey="signedContracts" fill="#16a34a" name="Signed contracts" radius={[3, 3, 0, 0]} />
+              <Line isAnimationActive={false} type="monotone" dataKey="ltContracts" stroke="#2563eb" strokeWidth={2} name="Lithuania contracts" dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="lvContracts" stroke="#7c3aed" strokeWidth={2} name="Latvia contracts" dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="rbiContracts" stroke="#f59e0b" strokeWidth={2} name="RBI / residence contracts" dot={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -1481,7 +1598,7 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
 
       <Panel title="Country-level financial performance" exportSplit>
         <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
-          Country rows use CRM leads created in {activeMonth.label}. Sales/revenue/cost are estimated by lead share unless CRM deal value is filled. Use this as directional country analytics, not perfect attribution.
+          Country rows use clean CRM leads for conversion and allocate finance contracts, sales, revenue, and costs by clean-lead share. CRM created leads are shown separately for audit.
         </div>
         <div className="pdf-ignore mb-4 flex flex-wrap gap-2">
           <select
@@ -1504,22 +1621,33 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
               <option key={service} value={service}>{service}</option>
             ))}
           </select>
+          <select
+            value={selectedCountrySource}
+            onChange={(event) => setSelectedCountrySource(event.target.value)}
+            className="h-10 max-w-64 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-800"
+          >
+            <option value="">All sources</option>
+            {countrySourceOptions.map((source) => (
+              <option key={source} value={source}>{source}</option>
+            ))}
+          </select>
         </div>
         <div className="overflow-hidden">
           <table className="w-full table-fixed text-xs lg:text-sm">
             <colgroup>
               <col className="w-[11%]" />
               <col className="w-[13%]" />
-              {Array.from({ length: 10 }).map((_, index) => <col key={index} />)}
+              {Array.from({ length: 11 }).map((_, index) => <col key={index} />)}
               <col className="w-[16%]" />
             </colgroup>
             <thead>
               <tr className="border-b border-slate-200 text-left text-[11px] uppercase leading-tight text-slate-500">
                 <th className="px-1 py-3">Country</th>
                 <th className="px-1 py-3">Service direction</th>
-                <th className="px-1 py-3 text-right">Leads</th>
+                <th className="px-1 py-3 text-right">CRM created</th>
+                <th className="px-1 py-3 text-right">Clean leads</th>
                 <th className="px-1 py-3 text-right">Qualified</th>
-                <th className="px-1 py-3 text-right">Signed</th>
+                <th className="px-1 py-3 text-right">Signed est.</th>
                 <th className="px-1 py-3 text-right">Sales value</th>
                 <th className="px-1 py-3 text-right">Revenue</th>
                 <th className="px-1 py-3 text-right">Mkt. cost</th>
@@ -1536,6 +1664,7 @@ function FinancialReport({ analytics, records, financeData }: { analytics: Analy
                 <tr key={`${row.country}-${row.service}`} className="border-b border-slate-100">
                   <td className="break-words px-1 py-3 font-medium text-slate-950">{row.country}</td>
                   <td className="break-words px-1 py-3 text-slate-700">{row.service}</td>
+                  <td className="px-1 py-3 text-right">{formatNumber(row.rawLeads)}</td>
                   <td className="px-1 py-3 text-right">{formatNumber(row.leads)}</td>
                   <td className="px-1 py-3 text-right">{formatNumber(row.qualified)}</td>
                   <td className="px-1 py-3 text-right font-medium text-slate-950">{formatNumber(row.signedContracts)}</td>
@@ -1616,37 +1745,6 @@ function ReportPage({ title, children }: { title: string; children: ReactNode })
   );
 }
 
-function dedupeScore(record: CRMRecord) {
-  let score = 0;
-  if (record.duplicateFlag.toLowerCase() !== "true") score += 20;
-  if (record.status.toUpperCase() !== "INTERNAL MAIL") score += 15;
-  if (!["DOUBLE", "SPAM", "NON-RELEVANT LEAD"].includes(record.rejectionReason.toUpperCase())) score += 10;
-  if (record.reportingService !== "Other / Unknown") score += 8;
-  if (record.source !== "Unknown") score += 6;
-  if (record.relevant.trim()) score += 5;
-  if (record.country !== "Unknown") score += 3;
-  if (record.firstContactAt || record.firstResponseAt || record.meetingBookedAt || record.meetingHeldAt) score += 4;
-  if (record.agreementSentAt || record.agreementSignedAt || record.firstPaymentAt || record.fullPaymentAt) score += 10;
-  if (record.createdAt) score += 1;
-  return score;
-}
-
-function uniqueLeadRecords(records: CRMRecord[]) {
-  const byIdentity = new Map<string, CRMRecord>();
-  for (const record of records) {
-    const key = leadIdentityKey(record);
-    const current = byIdentity.get(key);
-    if (!current || dedupeScore(record) > dedupeScore(current)) {
-      byIdentity.set(key, record);
-    }
-  }
-  return [...byIdentity.values()].sort((a, b) => {
-    const aTime = a.createdAt?.getTime() ?? 0;
-    const bTime = b.createdAt?.getTime() ?? 0;
-    return aTime - bTime || a.rowNumber - b.rowNumber;
-  });
-}
-
 export default function Home() {
   const [records, setRecords] = useState<CRMRecord[]>([]);
   const [financeData, setFinanceData] = useState<FinanceData | null>(null);
@@ -1707,19 +1805,21 @@ export default function Home() {
     };
   }, []);
 
-  const dateAndQualityFilteredRecords = useMemo(() => {
+  const dateFilteredRawRecords = useMemo(() => {
     const fromDate = dateFromInput(dateRange.from);
     const toDate = dateFromInput(dateRange.to, true);
 
-    const dateFiltered = records.filter((record) => {
+    return records.filter((record) => {
       if (!fromDate && !toDate) return true;
       if (!record.createdAt) return false;
       if (fromDate && record.createdAt < fromDate) return false;
       if (toDate && record.createdAt > toDate) return false;
       return true;
     });
-    return uniqueOnly ? uniqueLeadRecords(dateFiltered) : dateFiltered;
-  }, [dateRange.from, dateRange.to, records, uniqueOnly]);
+  }, [dateRange.from, dateRange.to, records]);
+
+  const cleanupResult = useMemo<LeadCleanupResult>(() => cleanLeadRecords(dateFilteredRawRecords), [dateFilteredRawRecords]);
+  const dateAndQualityFilteredRecords = uniqueOnly ? cleanupResult.records : dateFilteredRawRecords;
 
   const serviceOptions = useMemo(
     () => [...new Set(dateAndQualityFilteredRecords.map((record) => record.reportingService))]
@@ -1736,6 +1836,12 @@ export default function Home() {
     const selected = new Set(selectedServices);
     return dateAndQualityFilteredRecords.filter((record) => selected.has(record.reportingService));
   }, [dateAndQualityFilteredRecords, selectedServices, serviceOptions.length]);
+
+  const rawFilteredRecords = useMemo(() => {
+    if (!selectedServices.length || selectedServices.length === serviceOptions.length) return dateFilteredRawRecords;
+    const selected = new Set(selectedServices);
+    return dateFilteredRawRecords.filter((record) => selected.has(record.reportingService));
+  }, [dateFilteredRawRecords, selectedServices, serviceOptions.length]);
 
   const dateFilteredFinance = useMemo(
     () => filterFinanceData(financeData, dateRange.from, dateRange.to),
@@ -1755,14 +1861,16 @@ export default function Home() {
     : [];
   const dateFilterActive = Boolean(records.length && (dateRange.from !== fullDateBounds.from || dateRange.to !== fullDateBounds.to));
   const serviceFilterActive = selectedServiceNames.length > 0;
-  const hasActiveFilters = dateFilterActive || uniqueOnly || serviceFilterActive;
+  const hasActiveFilters = dateFilterActive || !uniqueOnly || serviceFilterActive;
   const filterDescription = [
     dateFilterActive ? `Date range: ${dateRange.from || "start"} to ${dateRange.to || "end"}.` : "",
-    uniqueOnly ? "Unique leads only is enabled." : "",
+    uniqueOnly ? "" : "CRM created leads mode is enabled.",
     serviceFilterActive ? `Service filter: ${selectedServiceNames.join(", ")}.` : "",
   ].filter(Boolean).join(" ");
   const reportScope: ReportScope = {
     rawTotal: records.length,
+    rawDateTotal: dateFilteredRawRecords.length,
+    cleanTotal: cleanupResult.cleanCount,
     dateAndQualityTotal: dateAndQualityFilteredRecords.length,
     visibleTotal: filteredRecords.length,
     hasActiveFilters,
@@ -1962,8 +2070,8 @@ export default function Home() {
                 <CalendarDays className="h-4 w-4" />
                 {analytics.dateRange}
               </span>
-              <span>{formatNumber(analytics.total)} rows</span>
-              <span>{uniqueOnly ? "Unique leads only" : "All leads"}</span>
+              <span>{formatNumber(analytics.total)} leads</span>
+              <span>{uniqueOnly ? "Clean leads" : "CRM created leads"}</span>
               <span>{!selectedServices.length || selectedServices.length === serviceOptions.length ? "All services" : `${selectedServices.length} selected services`}</span>
               <span className="max-w-full truncate">Dataset: {fileName}</span>
               <span className="max-w-full truncate">Finance: {financeFileName}</span>
@@ -2025,9 +2133,9 @@ export default function Home() {
                     ? "border-blue-600 bg-blue-50 text-blue-700"
                     : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50",
                 )}
-                title="Unique leads only keeps one best CRM row per email, Google Client ID, counterparty, or title; All leads shows raw CRM rows."
+                title="Clean leads remove duplicates and obvious technical/system records. CRM created leads shows raw CRM-created rows for the selected date range."
               >
-                {uniqueOnly ? "Unique leads only" : "All leads"}
+                {uniqueOnly ? "Clean leads" : "CRM created leads"}
               </button>
               <ServiceFilter options={serviceOptions} selected={selectedServices} onChange={setSelectedServices} />
             </div>
@@ -2157,7 +2265,7 @@ export default function Home() {
         {tab === "sources" ? <Sources analytics={analytics} scope={reportScope} onResetFilters={resetAllFilters} /> : null}
         {tab === "conversion" ? <Conversion analytics={analytics} /> : null}
         {tab === "cohorts" ? <Cohorts analytics={analytics} /> : null}
-        {tab === "financial" ? <FinancialReport analytics={analytics} records={filteredRecords} financeData={financeData} /> : null}
+        {tab === "financial" ? <FinancialReport analytics={analytics} records={filteredRecords} rawRecords={rawFilteredRecords} cleanupResult={cleanupResult} financeData={financeData} /> : null}
         {tab === "quality" ? <Quality analytics={analytics} /> : null}
       </section>
 
@@ -2185,7 +2293,7 @@ export default function Home() {
           ) : null}
           {exportMode === "all" || tab === "financial" ? (
             <ReportPage title="Financial funnel">
-              <FinancialReport analytics={analytics} records={filteredRecords} financeData={financeData} />
+              <FinancialReport analytics={analytics} records={filteredRecords} rawRecords={rawFilteredRecords} cleanupResult={cleanupResult} financeData={financeData} />
             </ReportPage>
           ) : null}
           {exportMode === "all" || tab === "quality" ? (

@@ -85,6 +85,144 @@ export function leadIdentityKey(record: Pick<CRMRecord, "email" | "googleClientI
   return record.id ? `id:${record.id}` : `row:${record.rowNumber}`;
 }
 
+export type LeadCleanupRule = "duplicate" | "technical" | "invalid" | "test";
+
+export type LeadCleanupResult = {
+  records: CRMRecord[];
+  excluded: Record<LeadCleanupRule, number>;
+  rawCount: number;
+  cleanCount: number;
+};
+
+const DEDUPE_WINDOW_MS = 30 * DAY_MS;
+
+function leadDedupeKey(record: CRMRecord): string {
+  return `${leadIdentityKey(record)}|||${record.reportingService}`;
+}
+
+function hasUsableIdentity(record: CRMRecord): boolean {
+  return Boolean(
+    identityText(record.email)
+    || identityText(record.googleClientId)
+    || identityText(record.counterparty)
+    || identityText(record.title),
+  );
+}
+
+function technicalReason(record: CRMRecord): LeadCleanupRule | null {
+  const email = record.email.trim().toLowerCase();
+  const haystack = [
+    record.title,
+    record.counterparty,
+    record.sourceRaw,
+    record.source,
+    record.type,
+    record.status,
+    record.rejectionReason,
+    email,
+  ].join(" ").toLowerCase();
+
+  if (/\b(test|testing|demo|internal check)\b/.test(haystack)) return "test";
+  if (!hasUsableIdentity(record)) return "invalid";
+  if (
+    email.startsWith("noreply@")
+    || email.startsWith("no-reply@")
+    || email.startsWith("support@")
+    || /\b(wise|noreply|no-reply|notification|system|internal mail|planfix|2invoice|payment notification|automated service|maxeltracker)\b/.test(haystack)
+  ) {
+    return "technical";
+  }
+
+  return null;
+}
+
+function dedupeScore(record: CRMRecord): number {
+  let score = 0;
+  const status = record.status.toUpperCase();
+  const rejectionReason = record.rejectionReason.toUpperCase();
+  if (record.duplicateFlag.toLowerCase() !== "true") score += 20;
+  if (status !== "INTERNAL MAIL") score += 15;
+  if (!["DOUBLE", "SPAM", "NON-RELEVANT LEAD"].includes(rejectionReason)) score += 10;
+  if (record.reportingService !== "Other / Unknown") score += 8;
+  if (record.source !== "Unknown") score += 6;
+  if (record.relevant.trim()) score += 5;
+  if (record.country !== "Unknown") score += 3;
+  if (record.firstContactAt || record.firstResponseAt || record.meetingBookedAt || record.meetingHeldAt) score += 4;
+  if (record.agreementSentAt || record.agreementSignedAt || record.firstPaymentAt || record.fullPaymentAt) score += 10;
+  if (record.createdAt) score += 1;
+  return score;
+}
+
+export function cleanLeadRecords(records: CRMRecord[]): LeadCleanupResult {
+  const excluded: Record<LeadCleanupRule, number> = {
+    duplicate: 0,
+    technical: 0,
+    invalid: 0,
+    test: 0,
+  };
+  const candidates: CRMRecord[] = [];
+
+  for (const record of records) {
+    const baseReason = technicalReason(record);
+    if (baseReason) {
+      excluded[baseReason] += 1;
+    } else {
+      candidates.push(record);
+    }
+  }
+
+  const grouped = new Map<string, CRMRecord[]>();
+  for (const record of candidates) {
+    const key = leadDedupeKey(record);
+    grouped.set(key, [...(grouped.get(key) ?? []), record]);
+  }
+
+  const clean: CRMRecord[] = [];
+  for (const group of grouped.values()) {
+    const sorted = [...group].sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0) || a.rowNumber - b.rowNumber);
+    let cluster: CRMRecord[] = [];
+    let clusterStart = 0;
+
+    const flushCluster = () => {
+      if (!cluster.length) return;
+      const best = cluster.reduce((currentBest, record) => (dedupeScore(record) > dedupeScore(currentBest) ? record : currentBest), cluster[0]);
+      clean.push(best);
+      excluded.duplicate += cluster.length - 1;
+      cluster = [];
+    };
+
+    for (const record of sorted) {
+      const recordTime = record.createdAt?.getTime() ?? 0;
+      const startsDuplicate = record.duplicateFlag.toLowerCase() === "true" || record.rejectionReason.toUpperCase() === "DOUBLE";
+      if (startsDuplicate) {
+        excluded.duplicate += 1;
+        continue;
+      }
+      if (!cluster.length) {
+        cluster = [record];
+        clusterStart = recordTime;
+        continue;
+      }
+      if (recordTime && clusterStart && recordTime - clusterStart <= DEDUPE_WINDOW_MS) {
+        cluster.push(record);
+      } else {
+        flushCluster();
+        cluster = [record];
+        clusterStart = recordTime;
+      }
+    }
+    flushCluster();
+  }
+
+  const sortedClean = clean.sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0) || a.rowNumber - b.rowNumber);
+  return {
+    records: sortedClean,
+    excluded,
+    rawCount: records.length,
+    cleanCount: sortedClean.length,
+  };
+}
+
 function numberValue(value: RawCell): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const normalized = text(value).replace(/\s/g, "").replace(",", ".");
@@ -205,11 +343,18 @@ function normalizeReportingService(value: string): string {
   }
   if (
     lower.includes("rbi") ||
+    lower.includes("residence by")
+  ) {
+    if ((lower.includes("latv") || /\blv\b/.test(lower)) && (lower.includes("company") || lower.includes("investment"))) {
+      return "Latvia RBI through company / investment";
+    }
+    return "Latvia RBI through real estate";
+  }
+  if (
     lower.includes("residence through") ||
-    lower.includes("residence by") ||
     (lower.includes("residence") && (lower.includes("company") || lower.includes("business")))
   ) {
-    return "Residence through business / company";
+    return "Lithuania residence through business / company";
   }
   if (
     lower.includes("company") ||
