@@ -81,6 +81,7 @@ const panelHelp: Record<string, string> = {
   "Lead to client funnel": "Step funnel from all leads to full payment. Each rate is calculated against total leads.",
   "Conversion by channel": "Compares channel volume and conversion quality side by side.",
   "Conversion by service": "Compares service volume and conversion quality side by side.",
+  "Relevant strict rate by service": "Shows what share of clean leads in each service direction has CRM field Relevant exactly equal to Relevant.",
   "Monthly cohorts": "Groups leads by creation month and tracks payment timing using real first_payment_at dates only.",
   "Service cohorts": "Separate cohort tables by normalized product/service. Each service shows latest 10 monthly cohorts and payment timing.",
   "Cohort conversion trend": "Compares cohort quality: active-qualified rate, current paid proxy, paid with date by M5, and rejected rate.",
@@ -428,6 +429,65 @@ function ServiceFilter({
                 className="mt-0.5"
               />
               <span className="leading-snug">{service}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function ChannelFilter({
+  options,
+  selected,
+  onChange,
+}: {
+  options: string[];
+  selected: string[];
+  onChange: (channels: string[]) => void;
+}) {
+  const allSelected = !selected.length || selected.length === options.length;
+  const label = allSelected
+    ? "All channels"
+    : selected.length === 1
+      ? selected[0]
+      : `${selected.length} channels`;
+
+  function toggle(channel: string) {
+    const current = allSelected ? options : selected;
+    const next = current.includes(channel)
+      ? current.filter((item) => item !== channel)
+      : [...current, channel];
+    onChange(next.length === options.length ? [] : next);
+  }
+
+  return (
+    <details className="relative">
+      <summary className="flex h-10 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">
+        <Filter className="h-4 w-4" />
+        <span className="max-w-48 truncate">{label}</span>
+      </summary>
+      <div className="absolute left-0 z-20 mt-2 w-80 rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+        <div className="mb-2 flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
+          <button
+            type="button"
+            onClick={() => onChange([])}
+            className="rounded-md px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+          >
+            All
+          </button>
+          <span className="text-xs text-slate-500">{options.length} available</span>
+        </div>
+        <div className="grid max-h-72 gap-1 overflow-y-auto">
+          {options.map((channel) => (
+            <label key={channel} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 text-sm text-slate-700 hover:bg-slate-50">
+              <input
+                type="checkbox"
+                checked={allSelected || selected.includes(channel)}
+                onChange={() => toggle(channel)}
+                className="mt-0.5"
+              />
+              <span className="leading-snug">{channel}</span>
             </label>
           ))}
         </div>
@@ -859,12 +919,58 @@ function Sources({ analytics, scope, onResetFilters }: { analytics: Analytics; s
   );
 }
 
-function Conversion({ analytics }: { analytics: Analytics }) {
-  const max = analytics.funnel[0]?.count || 1;
+function financeForChannels(finance: FinanceData | undefined, selectedChannels: string[]) {
+  if (!finance || !selectedChannels.length) return finance;
+  const selected = new Set(selectedChannels);
+  const channelCosts = finance.channelCosts.filter((record) => selected.has(record.source));
+  const spendByMonth = new Map<string, { marketingCost: number; paidTrafficCost: number }>();
+  for (const record of channelCosts) {
+    const current = spendByMonth.get(record.month) ?? { marketingCost: 0, paidTrafficCost: 0 };
+    current.marketingCost += record.amount;
+    current.paidTrafficCost += record.amount;
+    spendByMonth.set(record.month, current);
+  }
+
+  return {
+    monthly: finance.monthly.map((record) => {
+      const spend = spendByMonth.get(record.month) ?? { marketingCost: 0, paidTrafficCost: 0 };
+      return {
+        ...record,
+        revenue: 0,
+        marketingCost: spend.marketingCost,
+        profitAfterMarketing: -spend.marketingCost,
+        signedContracts: 0,
+        paidTrafficCost: spend.paidTrafficCost,
+        sales: 0,
+        leads: 0,
+        clicks: 0,
+      };
+    }),
+    channelCosts,
+  };
+}
+
+function Conversion({ analytics, records, finance }: { analytics: Analytics; records: CRMRecord[]; finance?: FinanceData }) {
+  const [selectedChannels, setSelectedChannels] = useState<string[]>([]);
+  const channelOptions = useMemo(
+    () => [...new Set(records.map((record) => record.source || "Unknown"))].sort((a, b) => a.localeCompare(b)),
+    [records],
+  );
+  const conversionRecords = useMemo(() => {
+    if (!selectedChannels.length || selectedChannels.length === channelOptions.length) return records;
+    const selected = new Set(selectedChannels);
+    return records.filter((record) => selected.has(record.source || "Unknown"));
+  }, [channelOptions.length, records, selectedChannels]);
+  const conversionFinance = useMemo(() => financeForChannels(finance, selectedChannels), [finance, selectedChannels]);
+  const conversionAnalytics = useMemo(
+    () => (selectedChannels.length ? buildAnalytics(conversionRecords, conversionFinance) : analytics),
+    [analytics, conversionFinance, conversionRecords, selectedChannels.length],
+  );
+  const max = conversionAnalytics.funnel[0]?.count || 1;
   const [selectedSource, setSelectedSource] = useState("");
-  const sourceOptions = useMemo(() => analytics.sourceRows.map((row) => row.name), [analytics.sourceRows]);
+  const sourceOptions = useMemo(() => conversionAnalytics.sourceRows.map((row) => row.name), [conversionAnalytics.sourceRows]);
   const activeSource = sourceOptions.includes(selectedSource) ? selectedSource : sourceOptions[0] || "";
-  const activeSourceMonthly = analytics.sourceMonthlyConversion.filter((row) => row.source === activeSource);
+  const activeSourceMonthly = conversionAnalytics.sourceMonthlyConversion.filter((row) => row.source === activeSource);
 
   useEffect(() => {
     if (!sourceOptions.length) return;
@@ -873,30 +979,44 @@ function Conversion({ analytics }: { analytics: Analytics }) {
     }
   }, [selectedSource, sourceOptions]);
 
+  useEffect(() => {
+    setSelectedChannels((current) => current.filter((channel) => channelOptions.includes(channel)));
+  }, [channelOptions]);
+
   return (
     <div className="space-y-5">
+      <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-950">Conversion scope</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Select one or more channels to recalculate conversion and relevancy metrics for this page only.
+          </p>
+        </div>
+        <ChannelFilter options={channelOptions} selected={selectedChannels} onChange={setSelectedChannels} />
+      </div>
+
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Leads" value={formatNumber(analytics.total)} sub={`${formatNumber(analytics.uniqueTotal)} unique in current filter`} help="All CRM rows after global date filter and optional unique-only mode." />
-        <KpiCard label="Relevant strict" value={formatPercent(analytics.relevantStrictRate)} sub="Only Relevant = Relevant" help="Strict metric from CRM Relevant field only." tone="green" />
-        <KpiCard label="Qualified / Active proxy" value={formatPercent(analytics.qualifiedActiveRate)} sub="Relevant plus active statuses" help="Hybrid proxy: Relevant field, active statuses, first contact/response." tone="blue" />
-        <KpiCard label="Agreement sent" value={formatPercent(analytics.agreementSentRate)} sub="Date or status >= sent" help="Uses agreement_sent_at or pipeline statuses at/after retainer agreement sent." tone="blue" />
-        <KpiCard label="Agreement signed" value={formatPercent(analytics.agreementSignedRate)} sub="Signed date or paid stage proxy" help="Uses agreement_signed_at or explicitly paid/signed pipeline statuses." tone="green" />
-        <KpiCard label="First payment" value={formatPercent(analytics.clientRate)} sub="Client definition" help="Client = first payment reached, using payment date when present, otherwise payment status proxy." tone="amber" />
-        <KpiCard label="Full payment" value={formatPercent(analytics.fullPaidClientRate)} sub="Full-paid client" help="Share of leads that reached full payment or completed status." tone="green" />
-        <KpiCard label="Duplicates" value={formatPercent(analytics.duplicateRate)} sub="Repeated identity rows" help="Rows marked duplicate_flag or repeated by email, Google Client ID, counterparty, or title." tone="red" />
+        <KpiCard label="Leads" value={formatNumber(conversionAnalytics.total)} sub={`${formatNumber(conversionAnalytics.uniqueTotal)} unique in current filter`} help="All CRM rows after global date filter and optional unique-only mode." />
+        <KpiCard label="Relevant strict" value={formatPercent(conversionAnalytics.relevantStrictRate)} sub="Only Relevant = Relevant" help="Strict metric from CRM Relevant field only." tone="green" />
+        <KpiCard label="Qualified / Active proxy" value={formatPercent(conversionAnalytics.qualifiedActiveRate)} sub="Relevant plus active statuses" help="Hybrid proxy: Relevant field, active statuses, first contact/response." tone="blue" />
+        <KpiCard label="Agreement sent" value={formatPercent(conversionAnalytics.agreementSentRate)} sub="Date or status >= sent" help="Uses agreement_sent_at or pipeline statuses at/after retainer agreement sent." tone="blue" />
+        <KpiCard label="Agreement signed" value={formatPercent(conversionAnalytics.agreementSignedRate)} sub="Signed date or paid stage proxy" help="Uses agreement_signed_at or explicitly paid/signed pipeline statuses." tone="green" />
+        <KpiCard label="First payment" value={formatPercent(conversionAnalytics.clientRate)} sub="Client definition" help="Client = first payment reached, using payment date when present, otherwise payment status proxy." tone="amber" />
+        <KpiCard label="Full payment" value={formatPercent(conversionAnalytics.fullPaidClientRate)} sub="Full-paid client" help="Share of leads that reached full payment or completed status." tone="green" />
+        <KpiCard label="Duplicates" value={formatPercent(conversionAnalytics.duplicateRate)} sub="Repeated identity rows" help="Rows marked duplicate_flag or repeated by email, Google Client ID, counterparty, or title." tone="red" />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <KpiCard label="CPL" value={formatCurrency(analytics.finance.cpl)} sub="Marketing spend / leads" help="Average marketing spend needed to generate one CRM lead." />
-        <KpiCard label="CPQL" value={formatCurrency(analytics.finance.cpql)} sub="Marketing spend / qualified-active leads" help="Average marketing spend per qualified or active-proxy lead." />
-        <KpiCard label="CAC" value={formatCurrency(analytics.finance.cac)} sub="Marketing spend / clients" help="Average marketing spend per first-payment client." tone="amber" />
-        <KpiCard label="Cost per signed contract" value={formatCurrency(analytics.finance.costPerSignedContract)} sub="Finance signed contracts" help="Marketing spend divided by signed contracts from the finance report." tone="green" />
+        <KpiCard label="CPL" value={formatCurrency(conversionAnalytics.finance.cpl)} sub="Marketing spend / leads" help="Average marketing spend needed to generate one CRM lead." />
+        <KpiCard label="CPQL" value={formatCurrency(conversionAnalytics.finance.cpql)} sub="Marketing spend / qualified-active leads" help="Average marketing spend per qualified or active-proxy lead." />
+        <KpiCard label="CAC" value={formatCurrency(conversionAnalytics.finance.cac)} sub="Marketing spend / clients" help="Average marketing spend per first-payment client." tone="amber" />
+        <KpiCard label="Cost per signed contract" value={formatCurrency(conversionAnalytics.finance.costPerSignedContract)} sub="Finance signed contracts" help="Marketing spend divided by signed contracts from the finance report." tone="green" />
         <KpiCard
           label="CRM signed value"
-          value={analytics.crmSignedSalesValue ? formatCurrency(analytics.crmSignedSalesValue) : "n/a"}
-          sub={analytics.crmSignedSalesValue ? `${formatPercent(analytics.crmSignedSalesCoverage)} signed rows covered` : "deal_value_actual is empty"}
+          value={conversionAnalytics.crmSignedSalesValue ? formatCurrency(conversionAnalytics.crmSignedSalesValue) : "n/a"}
+          sub={conversionAnalytics.crmSignedSalesValue ? `${formatPercent(conversionAnalytics.crmSignedSalesCoverage)} signed rows covered` : "deal_value_actual is empty"}
           help="Potential CRM Sales: sum of deal_value_actual for rows that reached agreement signed. Current export does not fill this field, so finance Sales remains the reliable signed-contract value."
-          tone={analytics.crmSignedSalesValue ? "green" : "amber"}
+          tone={conversionAnalytics.crmSignedSalesValue ? "green" : "amber"}
         />
       </div>
 
@@ -904,7 +1024,7 @@ function Conversion({ analytics }: { analytics: Analytics }) {
         <Panel title="Monthly conversion trend">
           <div className="h-[360px]">
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={analytics.monthly}>
+              <ComposedChart data={conversionAnalytics.monthly}>
                 <CartesianGrid stroke="#e2e8f0" vertical={false} />
                 <XAxis dataKey="label" tick={{ fontSize: 12 }} />
                 <YAxis
@@ -979,7 +1099,7 @@ function Conversion({ analytics }: { analytics: Analytics }) {
 
       <Panel title="Lead to client funnel">
         <div className="grid gap-3">
-          {analytics.funnel.map((stage, index) => (
+          {conversionAnalytics.funnel.map((stage, index) => (
             <div key={stage.stage} className="grid gap-2 rounded-lg border border-slate-200 p-4 md:grid-cols-[160px_1fr_120px] md:items-center">
               <div>
                 <div className="text-sm font-semibold text-slate-950">{stage.stage}</div>
@@ -1003,11 +1123,61 @@ function Conversion({ analytics }: { analytics: Analytics }) {
         </div>
       </Panel>
 
+      <Panel title="Relevant strict rate by service">
+        <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          Relevant strict rate = leads where CRM field <strong>Relevant</strong> is exactly <strong>Relevant</strong> divided by all clean leads in that service direction for the selected global date range.
+        </div>
+        <div style={{ height: Math.max(360, conversionAnalytics.serviceRows.length * 64) }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={conversionAnalytics.serviceRows} layout="vertical" margin={{ left: 12, right: 24 }}>
+              <CartesianGrid stroke="#e2e8f0" horizontal={false} />
+              <XAxis
+                type="number"
+                domain={[0, 1]}
+                tickFormatter={(value) => `${Math.round(Number(value) * 100)}%`}
+                tick={{ fontSize: 12 }}
+              />
+              <YAxis dataKey="name" type="category" width={190} tick={{ fontSize: 12 }} />
+              <Tooltip
+                formatter={(value, name) => {
+                  if (String(name).includes("rate")) return formatPercent(numericValue(value));
+                  return formatNumber(numericValue(value));
+                }}
+              />
+              <Legend />
+              <Bar isAnimationActive={false} dataKey="relevantStrictRate" fill="#0891b2" name="Relevant strict rate" radius={[0, 4, 4, 0]} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="mt-4 overflow-hidden rounded-lg border border-slate-200">
+          <table className="w-full table-fixed text-sm">
+            <thead>
+              <tr className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase text-slate-500">
+                <th className="px-3 py-3">Service direction</th>
+                <th className="px-3 py-3 text-right">Clean leads</th>
+                <th className="px-3 py-3 text-right">Relevant</th>
+                <th className="px-3 py-3 text-right">Relevant strict rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {conversionAnalytics.serviceRows.map((row) => (
+                <tr key={row.name} className="border-b border-slate-100">
+                  <td className="break-words px-3 py-3 font-medium text-slate-950">{row.name}</td>
+                  <td className="px-3 py-3 text-right">{formatNumber(row.leads)}</td>
+                  <td className="px-3 py-3 text-right">{formatNumber(row.relevantStrict)}</td>
+                  <td className="px-3 py-3 text-right font-semibold text-slate-950">{formatPercent(row.relevantStrictRate)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
       <div className="grid gap-5 xl:grid-cols-2">
         <Panel title="Conversion by channel">
-          <div style={{ height: Math.max(360, analytics.sourceRows.length * 54) }}>
+          <div style={{ height: Math.max(360, conversionAnalytics.sourceRows.length * 54) }}>
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={analytics.sourceRows}>
+              <ComposedChart data={conversionAnalytics.sourceRows}>
                 <CartesianGrid stroke="#e2e8f0" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 12 }} interval={0} angle={-25} textAnchor="end" height={82} />
                 <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
@@ -1025,9 +1195,9 @@ function Conversion({ analytics }: { analytics: Analytics }) {
         </Panel>
 
         <Panel title="Conversion by service">
-          <div style={{ height: Math.max(360, analytics.serviceRows.length * 58) }}>
+          <div style={{ height: Math.max(360, conversionAnalytics.serviceRows.length * 58) }}>
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={analytics.serviceRows}>
+              <ComposedChart data={conversionAnalytics.serviceRows}>
                 <CartesianGrid stroke="#e2e8f0" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 12 }} interval={0} angle={-25} textAnchor="end" height={82} />
                 <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
@@ -2263,7 +2433,7 @@ export default function Home() {
         </div>
         {tab === "overview" ? <Overview analytics={analytics} scope={reportScope} onResetFilters={resetAllFilters} /> : null}
         {tab === "sources" ? <Sources analytics={analytics} scope={reportScope} onResetFilters={resetAllFilters} /> : null}
-        {tab === "conversion" ? <Conversion analytics={analytics} /> : null}
+        {tab === "conversion" ? <Conversion analytics={analytics} records={filteredRecords} finance={filteredFinance} /> : null}
         {tab === "cohorts" ? <Cohorts analytics={analytics} /> : null}
         {tab === "financial" ? <FinancialReport analytics={analytics} records={filteredRecords} rawRecords={rawFilteredRecords} cleanupResult={cleanupResult} financeData={financeData} /> : null}
         {tab === "quality" ? <Quality analytics={analytics} /> : null}
@@ -2283,7 +2453,7 @@ export default function Home() {
           ) : null}
           {exportMode === "all" || tab === "conversion" ? (
             <ReportPage title="Conversion">
-              <Conversion analytics={analytics} />
+              <Conversion analytics={analytics} records={filteredRecords} finance={filteredFinance} />
             </ReportPage>
           ) : null}
           {exportMode === "all" || tab === "cohorts" ? (
