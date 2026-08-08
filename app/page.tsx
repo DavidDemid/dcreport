@@ -1475,7 +1475,7 @@ function FinancialReport({
     [analytics, financeData, records],
   );
   const months = financialAnalytics.monthly
-    .filter((row) => row.revenue || row.marketingSpend || row.sales || row.clicks || row.financeLeads || row.signedContracts)
+    .filter((row) => row.revenue || row.marketingSpend || row.sales || row.sessions || row.clicks || row.financeLeads || row.signedContracts)
     .sort((a, b) => b.month.localeCompare(a.month));
   const [selectedMonth, setSelectedMonth] = useState(months[0]?.month ?? "");
   const [selectedCountry, setSelectedCountry] = useState("");
@@ -1570,7 +1570,7 @@ function FinancialReport({
     cleanLeads: row.leads,
   }));
   const metricRows: FinancialMetricRow[] = [
-    { label: "Sessions", type: "number", actual: null },
+    { label: "Sessions", type: "number", actual: activeMonth.sessions || null, avg: activeMonth.avgSessions || null, previous: previousMonth?.sessions || null },
     { label: "Clicks", type: "number", actual: activeMonth.clicks, avg: activeMonth.avgClicks, previous: previousMonth?.clicks },
     { label: "CRM created leads", type: "number", actual: crmCreatedLeads, previous: previousCrmCreatedLeads || null },
     { label: "Clean leads", type: "number", actual: cleanLeads, avg: activeMonth.avgLeads, previous: previousCleanLeads || null },
@@ -1621,7 +1621,7 @@ function FinancialReport({
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Sessions" value="n/a" sub="GA4 source not connected" help="Website sessions should come from GA4 or website analytics. The current finance file has clicks, but not sessions." />
+        <KpiCard label="Sessions" value={activeMonth.sessions ? formatNumber(activeMonth.sessions) : "n/a"} sub="Website sessions from finance" help="Total website sessions recorded in the selected month on the Main numbers sheet. It is shown only when the finance workbook contains the # of sessions block." />
         <KpiCard label="Clicks" value={formatNumber(activeMonth.clicks)} sub="All traffic clicks from finance" help="Total clicks from the monthly finance funnel, not only CRM rows." />
         <KpiCard label="CRM created leads" value={formatNumber(crmCreatedLeads)} sub="Raw CRM rows by creation date" help="All CRM records where `Дата створення` falls in the selected month, before cleanup." tone="blue" />
         <KpiCard label="Clean leads" value={formatNumber(cleanLeads)} sub={`${formatNumber(Math.max(0, crmCreatedLeads - cleanLeads))} removed by cleanup`} help="CRM-created records after removing duplicates and obvious technical/system/test records. This is the default lead base for management metrics." tone="green" />

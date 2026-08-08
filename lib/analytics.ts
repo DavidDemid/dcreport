@@ -64,6 +64,7 @@ export type MonthlyRow = {
   profitAfterMarketing: number;
   signedContracts: number;
   financeLeads: number;
+  sessions: number;
   clicks: number;
   paidTrafficCost: number;
   sales: number;
@@ -75,6 +76,7 @@ export type MonthlyRow = {
   avgMarketingCost: number;
   avgPaidTrafficCost: number;
   avgSignedContracts: number;
+  avgSessions: number;
   avgLeads: number;
   avgClicks: number;
   ltContracts: number;
@@ -444,6 +446,7 @@ function financeMonthlyMap(finance?: FinanceData): Map<string, MonthlyRow> {
       profitAfterMarketing: 0,
       signedContracts: 0,
       financeLeads: 0,
+      sessions: 0,
       clicks: 0,
       paidTrafficCost: 0,
       sales: 0,
@@ -455,6 +458,7 @@ function financeMonthlyMap(finance?: FinanceData): Map<string, MonthlyRow> {
       avgMarketingCost: 0,
       avgPaidTrafficCost: 0,
       avgSignedContracts: 0,
+      avgSessions: 0,
       avgLeads: 0,
       avgClicks: 0,
       ltContracts: 0,
@@ -473,6 +477,7 @@ function financeMonthlyMap(finance?: FinanceData): Map<string, MonthlyRow> {
     current.profitAfterMarketing += record.profitAfterMarketing;
     current.signedContracts += record.signedContracts;
     current.financeLeads += record.leads ?? 0;
+    current.sessions += record.sessions ?? 0;
     current.clicks += record.clicks ?? 0;
     current.paidTrafficCost += record.paidTrafficCost ?? 0;
     current.sales += record.sales ?? 0;
@@ -484,6 +489,7 @@ function financeMonthlyMap(finance?: FinanceData): Map<string, MonthlyRow> {
     current.avgMarketingCost += record.avgMarketingCost ?? 0;
     current.avgPaidTrafficCost += record.avgPaidTrafficCost ?? 0;
     current.avgSignedContracts += record.avgSignedContracts ?? 0;
+    current.avgSessions += record.avgSessions ?? 0;
     current.avgLeads += record.avgLeads ?? 0;
     current.avgClicks += record.avgClicks ?? 0;
     current.ltContracts += record.ltContracts ?? 0;
@@ -553,6 +559,7 @@ function monthlyRows(records: CRMRecord[], finance?: FinanceData): MonthlyRow[] 
         profitAfterMarketing: financeMonth?.profitAfterMarketing ?? 0,
         signedContracts: financeMonth?.signedContracts ?? 0,
         financeLeads: financeMonth?.financeLeads ?? 0,
+        sessions: financeMonth?.sessions ?? 0,
         clicks: financeMonth?.clicks ?? 0,
         paidTrafficCost: financeMonth?.paidTrafficCost ?? 0,
         sales: financeMonth?.sales ?? 0,
@@ -564,6 +571,7 @@ function monthlyRows(records: CRMRecord[], finance?: FinanceData): MonthlyRow[] 
         avgMarketingCost: financeMonth?.avgMarketingCost ?? 0,
         avgPaidTrafficCost: financeMonth?.avgPaidTrafficCost ?? 0,
         avgSignedContracts: financeMonth?.avgSignedContracts ?? 0,
+        avgSessions: financeMonth?.avgSessions ?? 0,
         avgLeads: financeMonth?.avgLeads ?? 0,
         avgClicks: financeMonth?.avgClicks ?? 0,
         ltContracts: financeMonth?.ltContracts ?? 0,

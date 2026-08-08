@@ -8,6 +8,7 @@ export type FinanceMonthlyRecord = {
   marketingCost: number;
   profitAfterMarketing: number;
   signedContracts: number;
+  sessions?: number;
   clicks?: number;
   leads?: number;
   paidTrafficCost?: number;
@@ -26,6 +27,7 @@ export type FinanceMonthlyRecord = {
   avgMarketingCost?: number;
   avgPaidTrafficCost?: number;
   avgSignedContracts?: number;
+  avgSessions?: number;
   avgLeads?: number;
   avgClicks?: number;
   ltContracts?: number;
@@ -60,22 +62,45 @@ function monthKey(year: number, zeroBasedMonth: number): string {
   return `${year}-${String(zeroBasedMonth + 1).padStart(2, "0")}`;
 }
 
-function excelSerialMonth(value: RawCell): string | null {
-  const serial = numberValue(value);
-  if (!serial) return null;
-  const date = new Date(Date.UTC(1899, 11, 30) + serial * 24 * 60 * 60 * 1000);
-  if (Number.isNaN(date.getTime())) return null;
-  return monthKey(date.getUTCFullYear(), date.getUTCMonth());
-}
-
 function normalizeMonth(value: RawCell): number | null {
-  const raw = text(value).toLowerCase().replace(".", "");
+  const raw = text(value).toLowerCase().replaceAll(".", "");
   const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
   const fullMonths = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
   const shortIndex = months.findIndex((month) => raw.startsWith(month));
   if (shortIndex >= 0) return shortIndex;
   const fullIndex = fullMonths.findIndex((month) => raw.startsWith(month));
   return fullIndex >= 0 ? fullIndex : null;
+}
+
+function parseMonthKey(value: RawCell): string | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return monthKey(value.getUTCFullYear(), value.getUTCMonth());
+  }
+
+  if (typeof value === "number" && Number.isFinite(value) && value > 20_000) {
+    const date = new Date(Date.UTC(1899, 11, 30) + value * 24 * 60 * 60 * 1000);
+    if (!Number.isNaN(date.getTime())) return monthKey(date.getUTCFullYear(), date.getUTCMonth());
+  }
+
+  const raw = text(value).trim();
+  const iso = raw.match(/^(20\d{2})[-/.](0?[1-9]|1[0-2])(?:[-/.]\d{1,2})?$/);
+  if (iso) return monthKey(Number(iso[1]), Number(iso[2]) - 1);
+
+  const named = raw.match(/^([A-Za-z]+)[\s./-]+(\d{2}|20\d{2})$/);
+  if (!named) return null;
+  const month = normalizeMonth(named[1]);
+  if (month === null) return null;
+  const shortYear = Number(named[2]);
+  const year = shortYear < 100 ? 2000 + shortYear : shortYear;
+  return monthKey(year, month);
+}
+
+function normalizedLabel(value: RawCell): string {
+  return text(value)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[.:]+$/g, "")
+    .trim();
 }
 
 function normalizeFinanceSource(category: string): string {
@@ -155,43 +180,165 @@ function parseMarketingCosts(rows: RawCell[][]): FinanceChannelCostRecord[] {
   return records;
 }
 
+const MAIN_NUMBER_SECTIONS = [
+  "profit after marketing expenditure",
+  "revenue",
+  "sales",
+  "marketing cost",
+  "signed contracts",
+  "# of leads",
+  "# of clicks",
+  "# of sessions",
+  "conversion lead / contract",
+];
+
+type MainNumberSection = {
+  start: number;
+  end: number;
+};
+
+function findSection(rows: RawCell[][], heading: string, requiredRow?: string): MainNumberSection | null {
+  const target = normalizedLabel(heading);
+  const required = requiredRow ? normalizedLabel(requiredRow) : null;
+
+  for (let start = 0; start < rows.length; start += 1) {
+    if (normalizedLabel(rows[start]?.[0]) !== target) continue;
+    let end = rows.length;
+    for (let row = start + 1; row < rows.length; row += 1) {
+      if (MAIN_NUMBER_SECTIONS.includes(normalizedLabel(rows[row]?.[0]))) {
+        end = row;
+        break;
+      }
+    }
+    if (!required || rows.slice(start + 1, end).some((row) => normalizedLabel(row[0]) === required)) {
+      return { start, end };
+    }
+  }
+  return null;
+}
+
+function sectionRow(rows: RawCell[][], section: MainNumberSection | null, labels: string[]): RawCell[] | undefined {
+  if (!section) return undefined;
+  const targets = labels.map(normalizedLabel);
+  return rows
+    .slice(section.start + 1, section.end)
+    .find((row) => targets.includes(normalizedLabel(row[0])));
+}
+
+function rowValue(row: RawCell[] | undefined, column: number): number {
+  return numberValue(row?.[column]);
+}
+
 function parseMainNumbers(rows: RawCell[][]): FinanceMonthlyRecord[] {
-  const monthCells = rows[0]?.slice(1) ?? [];
-  const months = monthCells.map(excelSerialMonth);
+  const profit = findSection(rows, "Profit after marketing expenditure", "Act. result month");
+  const revenue = findSection(rows, "Revenue", "Act. result month");
+  const sales = findSection(rows, "Sales", "Act. result month");
+  const marketing = findSection(rows, "Marketing cost", "Act. result month");
+  const contracts = findSection(rows, "Signed contracts", "Act. result month");
+  const leads = findSection(rows, "# of leads", "Act. result month");
+  const clicks = findSection(rows, "# of clicks", "Act. result month");
+  const sessions = findSection(rows, "# of sessions", "Total");
+  const headerSection = profit ?? revenue ?? sales ?? marketing ?? contracts ?? leads ?? clicks ?? sessions;
+  if (!headerSection) return [];
+
+  const profitActual = sectionRow(rows, profit, ["Act. result month"]);
+  const profitPlan = sectionRow(rows, profit, ["Plan month"]);
+  const profitAverage = sectionRow(rows, profit, ["Act. result 3 months average"]);
+  const profitPlanAverage = sectionRow(rows, profit, ["Plan 3 months av.", "Plan 3 months average"]);
+  const revenueActual = sectionRow(rows, revenue, ["Act. result month"]);
+  const revenueAverage = sectionRow(rows, revenue, ["Act. result 3 months average"]);
+  const salesActual = sectionRow(rows, sales, ["Act. result month"]);
+  const salesAverage = sectionRow(rows, sales, ["Act. result 3 months average"]);
+  const marketingActual = sectionRow(rows, marketing, ["Act. result month"]);
+  const marketingAverage = sectionRow(rows, marketing, ["Act. result 3 months average"]);
+  const paidTraffic = sectionRow(rows, marketing, ["Paid traffic all", "Paid traffic"]);
+  const paidTrafficAverage = sectionRow(rows, marketing, ["Paid traffic 3 months average"]);
+  const contractsActual = sectionRow(rows, contracts, ["Act. result month"]);
+  const contractsAverage = sectionRow(rows, contracts, ["Act. result 3 months average"]);
+  const ltContracts = sectionRow(rows, contracts, ["LT contracts"]);
+  const lvContracts = sectionRow(rows, contracts, ["LV contracts"]);
+  const leadsActual = sectionRow(rows, leads, ["Act. result month"]);
+  const leadsAverage = sectionRow(rows, leads, ["Act. result 3 months average"]);
+  const clicksActual = sectionRow(rows, clicks, ["Act. result month"]);
+  const clicksAverage = sectionRow(rows, clicks, ["Act. result 3 months average"]);
+  const sessionsActual = sectionRow(rows, sessions, ["Total", "Act. result month"]);
+  const sessionsAverage = sectionRow(rows, sessions, ["3 mo avg", "Act. result 3 months average"]);
+  const header = rows[headerSection.start] ?? [];
   const records: FinanceMonthlyRecord[] = [];
 
-  function value(rowIndex: number, colIndex: number): number {
-    return numberValue(rows[rowIndex]?.[colIndex + 1]);
+  for (let column = 1; column < header.length; column += 1) {
+    const month = parseMonthKey(header[column]);
+    if (!month) continue;
+    const signedContracts = rowValue(contractsActual, column);
+    const lt = rowValue(ltContracts, column);
+    const lv = rowValue(lvContracts, column);
+    const record: FinanceMonthlyRecord = {
+      month,
+      revenue: rowValue(revenueActual, column),
+      marketingCost: rowValue(marketingActual, column),
+      profitAfterMarketing: rowValue(profitActual, column),
+      signedContracts,
+      sessions: rowValue(sessionsActual, column),
+      clicks: rowValue(clicksActual, column),
+      leads: rowValue(leadsActual, column),
+      paidTrafficCost: rowValue(paidTraffic, column),
+      sales: rowValue(salesActual, column),
+      planProfitAfterMarketing: rowValue(profitPlan, column),
+      planProfitAfterMarketing3MonthAverage: rowValue(profitPlanAverage, column),
+      avgProfitAfterMarketing: rowValue(profitAverage, column),
+      avgRevenue: rowValue(revenueAverage, column),
+      avgSales: rowValue(salesAverage, column),
+      avgMarketingCost: rowValue(marketingAverage, column),
+      avgPaidTrafficCost: rowValue(paidTrafficAverage, column),
+      avgSignedContracts: rowValue(contractsAverage, column),
+      avgSessions: rowValue(sessionsAverage, column),
+      avgLeads: rowValue(leadsAverage, column),
+      avgClicks: rowValue(clicksAverage, column),
+      ltContracts: lt,
+      lvContracts: lv,
+      rbiContracts: Math.max(0, signedContracts - lt - lv),
+    };
+    const hasActualData = [
+      record.revenue,
+      record.marketingCost,
+      record.profitAfterMarketing,
+      record.signedContracts,
+      record.sessions,
+      record.clicks,
+      record.leads,
+      record.paidTrafficCost,
+      record.sales,
+    ].some((value) => Boolean(value));
+    if (hasActualData) records.push(record);
   }
 
-  months.forEach((month, index) => {
-    if (!month) return;
-    records.push({
-      month,
-      revenue: value(6, index),
-      marketingCost: value(12, index),
-      profitAfterMarketing: value(1, index),
-      signedContracts: value(17, index),
-      clicks: value(25, index),
-      leads: value(28, index) || value(22, index),
-      paidTrafficCost: value(14, index),
-      sales: value(9, index),
-      planProfitAfterMarketing: value(2, index),
-      planProfitAfterMarketing3MonthAverage: value(4, index),
-      avgProfitAfterMarketing: value(3, index),
-      avgRevenue: value(7, index),
-      avgSales: value(10, index),
-      avgMarketingCost: value(13, index),
-      avgPaidTrafficCost: value(15, index),
-      avgSignedContracts: value(18, index),
-      avgLeads: value(23, index),
-      avgClicks: value(26, index),
-      ltContracts: value(19, index),
-      lvContracts: value(20, index),
-      rbiContracts: Math.max(0, value(17, index) - value(19, index) - value(20, index)),
-    });
-  });
+  return records;
+}
 
+function parseMainNumberChannelCosts(rows: RawCell[][]): FinanceChannelCostRecord[] {
+  const marketing = findSection(rows, "Marketing cost", "Act. result month");
+  if (!marketing) return [];
+  const header = rows[marketing.start] ?? [];
+  const categories: Array<{ labels: string[]; source: string }> = [
+    { labels: ["Paid traffic google"], source: "Google Ads" },
+    { labels: ["Paid traffic bing"], source: "Bing Ads" },
+    { labels: ["Paid traffic facebook", "Paid traffic instagram"], source: "Facebook / Instagram" },
+    { labels: ["Bridgewest (affiliate partner)", "Simona (affiliate partner)"], source: "Partner" },
+  ];
+  const records: FinanceChannelCostRecord[] = [];
+
+  for (const category of categories) {
+    for (const label of category.labels) {
+      const row = sectionRow(rows, marketing, [label]);
+      if (!row) continue;
+      for (let column = 1; column < header.length; column += 1) {
+        const month = parseMonthKey(header[column]);
+        const amount = rowValue(row, column);
+        if (!month || amount <= 0) continue;
+        records.push({ month, category: text(row[0]), source: category.source, amount });
+      }
+    }
+  }
   return records;
 }
 
@@ -231,6 +378,19 @@ function parseAnalysisCosts(rows: RawCell[][], month: string | null, monthly: Fi
   return records;
 }
 
+function analysisMonth(rows: RawCell[][], monthly: FinanceMonthlyRecord[]): string | null {
+  const comparison = rows
+    .map((row) => text(row[0]))
+    .find((label) => /[a-z]+\s+vs\s+[a-z]+/i.test(label));
+  const monthName = comparison?.match(/^([a-z]+)/i)?.[1];
+  const monthIndex = monthName ? normalizeMonth(monthName) : null;
+  if (monthIndex === null) return latestMonth(monthly);
+  return monthly
+    .map((record) => record.month)
+    .filter((month) => Number(month.slice(5, 7)) - 1 === monthIndex)
+    .sort((a, b) => b.localeCompare(a))[0] ?? null;
+}
+
 export async function parseFinanceWorkbook(file: ArrayBuffer): Promise<FinanceData> {
   const workbook = XLSX.read(file, {
     cellDates: false,
@@ -263,14 +423,22 @@ export async function parseFinanceWorkbook(file: ArrayBuffer): Promise<FinanceDa
 
   if (mainNumbersRows.length) {
     const monthly = parseMainNumbers(mainNumbersRows);
+    const detailedChannelCosts = parseMainNumberChannelCosts(mainNumbersRows);
+    const detailedMonths = new Set(detailedChannelCosts.map((record) => record.month));
+    const fallbackChannelCosts = parseAnalysisCosts(analysisRows, analysisMonth(analysisRows, monthly), monthly)
+      .filter((record) => !detailedMonths.has(record.month));
+    if (!monthly.length) {
+      throw new Error("No monthly finance data found. Check that the Main numbers sheet contains month headers and Act. result month rows.");
+    }
     return {
       monthly,
-      channelCosts: parseAnalysisCosts(analysisRows, latestMonth(monthly), monthly),
+      channelCosts: [...detailedChannelCosts, ...fallbackChannelCosts],
     };
   }
 
-  return {
-    monthly: parseActualResults(actualRows),
-    channelCosts: parseMarketingCosts(costRows),
-  };
+  const monthly = parseActualResults(actualRows);
+  if (!monthly.length) {
+    throw new Error("No supported finance data found. Expected a Main numbers sheet or Actual results sheet.");
+  }
+  return { monthly, channelCosts: parseMarketingCosts(costRows) };
 }
