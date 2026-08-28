@@ -100,6 +100,16 @@ function leadDedupeKey(record: CRMRecord): string {
   return `${leadIdentityKey(record)}|||${record.reportingService}`;
 }
 
+export function isDuplicateFlag(value: string): boolean {
+  return ["true", "yes", "y", "1", "так", "да"].includes(value.trim().toLowerCase());
+}
+
+function isDuplicateClosure(record: CRMRecord): boolean {
+  const status = record.status.trim().toUpperCase();
+  const reason = record.rejectionReason.trim().toUpperCase();
+  return reason === "DOUBLE" || (isDuplicateFlag(record.duplicateFlag) && status === "REJECTED");
+}
+
 function hasUsableIdentity(record: CRMRecord): boolean {
   return Boolean(
     identityText(record.email)
@@ -136,21 +146,94 @@ function technicalReason(record: CRMRecord): LeadCleanupRule | null {
   return null;
 }
 
-function dedupeScore(record: CRMRecord): number {
-  let score = 0;
-  const status = record.status.toUpperCase();
-  const rejectionReason = record.rejectionReason.toUpperCase();
-  if (record.duplicateFlag.toLowerCase() !== "true") score += 20;
-  if (status !== "INTERNAL MAIL") score += 15;
-  if (!["DOUBLE", "SPAM", "NON-RELEVANT LEAD"].includes(rejectionReason)) score += 10;
-  if (record.reportingService !== "Other / Unknown") score += 8;
-  if (record.source !== "Unknown") score += 6;
-  if (record.relevant.trim()) score += 5;
-  if (record.country !== "Unknown") score += 3;
-  if (record.firstContactAt || record.firstResponseAt || record.meetingBookedAt || record.meetingHeldAt) score += 4;
-  if (record.agreementSentAt || record.agreementSignedAt || record.firstPaymentAt || record.fullPaymentAt) score += 10;
-  if (record.createdAt) score += 1;
-  return score;
+function firstDate(records: CRMRecord[], getter: (record: CRMRecord) => Date | null): Date | null {
+  return records
+    .map(getter)
+    .filter((value): value is Date => Boolean(value))
+    .sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
+}
+
+function latestFilled<T>(records: CRMRecord[], getter: (record: CRMRecord) => T, filled: (value: T) => boolean): T | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const value = getter(records[index]);
+    if (filled(value)) return value;
+  }
+  return null;
+}
+
+function latestText(records: CRMRecord[], getter: (record: CRMRecord) => string): string {
+  return latestFilled(records, getter, (value) => Boolean(value.trim())) ?? "";
+}
+
+function latestKnownText(records: CRMRecord[], getter: (record: CRMRecord) => string): string {
+  return latestFilled(records, getter, (value) => Boolean(value.trim()) && value.trim().toLowerCase() !== "unknown") ?? "";
+}
+
+function consolidateLeadCluster(cluster: CRMRecord[]): CRMRecord {
+  const sorted = [...cluster].sort(
+    (a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0) || a.rowNumber - b.rowNumber,
+  );
+  const operational = sorted.filter((record) => !isDuplicateClosure(record));
+  const currentCandidates = operational.length ? operational : sorted;
+  const current = currentCandidates[currentCandidates.length - 1];
+  const relevantCandidates = operational.length ? operational : sorted;
+  const relevant = latestText(relevantCandidates, (record) => record.relevant);
+  const sourceRecord = sorted.find((record) => record.source !== "Unknown");
+  const maxDealValue = sorted.reduce<number | null>((maximum, record) => {
+    if (record.dealValueActual === null) return maximum;
+    return maximum === null ? record.dealValueActual : Math.max(maximum, record.dealValueActual);
+  }, null);
+
+  return {
+    ...current,
+    id: latestText(currentCandidates, (record) => record.id) || current.id,
+    counterparty: latestText(currentCandidates, (record) => record.counterparty) || latestText(sorted, (record) => record.counterparty),
+    title: latestText(currentCandidates, (record) => record.title) || latestText(sorted, (record) => record.title),
+    createdAt: firstDate(sorted, (record) => record.createdAt),
+    relevant,
+    service: latestKnownText(currentCandidates, (record) => record.service) || current.service,
+    country: latestKnownText(currentCandidates, (record) => record.country) || "Unknown",
+    googleClientId: latestText(sorted, (record) => record.googleClientId),
+    language: latestKnownText(currentCandidates, (record) => record.language) || "Unknown",
+    email: latestText(sorted, (record) => record.email),
+    completedAt: firstDate(sorted, (record) => record.completedAt),
+    agreementSentAt: firstDate(sorted, (record) => record.agreementSentAt),
+    agreementSignedAt: firstDate(sorted, (record) => record.agreementSignedAt),
+    dealValueActual: maxDealValue,
+    duplicateFlag: "false",
+    firstContactAt: firstDate(sorted, (record) => record.firstContactAt),
+    firstPaymentAt: firstDate(sorted, (record) => record.firstPaymentAt),
+    firstResponseAt: firstDate(sorted, (record) => record.firstResponseAt),
+    fullPaymentAt: firstDate(sorted, (record) => record.fullPaymentAt),
+    lawyerHandoverAt: firstDate(sorted, (record) => record.lawyerHandoverAt),
+    // A duplicate-closure row must not make an actively worked consolidated lead look rejected.
+    lostAt: current.lostAt,
+    meetingBookedAt: firstDate(sorted, (record) => record.meetingBookedAt),
+    meetingHeldAt: firstDate(sorted, (record) => record.meetingHeldAt),
+    paymentStatus: latestText(sorted, (record) => record.paymentStatus),
+    qualifiedService: latestText(currentCandidates, (record) => record.qualifiedService),
+    originalServiceInterest: latestText(currentCandidates, (record) => record.originalServiceInterest),
+    analyticsService: current.analyticsService,
+    reportingService: current.reportingService,
+    analyticsServiceMethod: current.analyticsServiceMethod,
+    ...(sourceRecord
+      ? {
+          source: sourceRecord.source,
+          sourceRaw: sourceRecord.sourceRaw,
+          sourceMethod: sourceRecord.sourceMethod,
+          normalizedSource: sourceRecord.normalizedSource,
+          utmTag: sourceRecord.utmTag,
+          firstTouchCampaign: sourceRecord.firstTouchCampaign,
+          firstTouchContent: sourceRecord.firstTouchContent,
+          firstTouchMedium: sourceRecord.firstTouchMedium,
+          firstTouchSource: sourceRecord.firstTouchSource,
+          utmCampaign: sourceRecord.utmCampaign,
+          utmContent: sourceRecord.utmContent,
+          utmMedium: sourceRecord.utmMedium,
+          utmSource: sourceRecord.utmSource,
+        }
+      : {}),
+  };
 }
 
 export function cleanLeadRecords(records: CRMRecord[]): LeadCleanupResult {
@@ -185,19 +268,18 @@ export function cleanLeadRecords(records: CRMRecord[]): LeadCleanupResult {
 
     const flushCluster = () => {
       if (!cluster.length) return;
-      const best = cluster.reduce((currentBest, record) => (dedupeScore(record) > dedupeScore(currentBest) ? record : currentBest), cluster[0]);
-      clean.push(best);
+      if (cluster.every(isDuplicateClosure)) {
+        excluded.duplicate += cluster.length;
+        cluster = [];
+        return;
+      }
+      clean.push(consolidateLeadCluster(cluster));
       excluded.duplicate += cluster.length - 1;
       cluster = [];
     };
 
     for (const record of sorted) {
       const recordTime = record.createdAt?.getTime() ?? 0;
-      const startsDuplicate = record.duplicateFlag.toLowerCase() === "true" || record.rejectionReason.toUpperCase() === "DOUBLE";
-      if (startsDuplicate) {
-        excluded.duplicate += 1;
-        continue;
-      }
       if (!cluster.length) {
         cluster = [record];
         clusterStart = recordTime;

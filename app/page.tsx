@@ -996,8 +996,8 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Leads" value={formatNumber(conversionAnalytics.total)} sub={`${formatNumber(conversionAnalytics.uniqueTotal)} unique in current filter`} help="All CRM rows after global date filter and optional unique-only mode." />
-        <KpiCard label="Relevant strict" value={formatPercent(conversionAnalytics.relevantStrictRate)} sub="Only Relevant = Relevant" help="Strict metric from CRM Relevant field only." tone="green" />
+        <KpiCard label="Leads" value={formatNumber(conversionAnalytics.total)} sub={`${formatNumber(conversionAnalytics.uniqueTotal)} unique in current filter`} help="Leads after date, service, channel, and Clean/CRM-created mode filters. In Clean mode, duplicate histories are already consolidated before the creation-date filter is applied." />
+        <KpiCard label="Relevant strict" value={formatPercent(conversionAnalytics.relevantStrictRate)} sub="Only Relevant = Relevant" help="Strict metric from the latest filled Relevant field in each consolidated lead history. The original acquisition source is retained from the earliest attributable record." tone="green" />
         <KpiCard label="Qualified / Active proxy" value={formatPercent(conversionAnalytics.qualifiedActiveRate)} sub="Relevant plus active statuses" help="Hybrid proxy: Relevant field, active statuses, first contact/response." tone="blue" />
         <KpiCard label="Agreement sent" value={formatPercent(conversionAnalytics.agreementSentRate)} sub="Date or status >= sent" help="Uses agreement_sent_at or pipeline statuses at/after retainer agreement sent." tone="blue" />
         <KpiCard label="Agreement signed" value={formatPercent(conversionAnalytics.agreementSignedRate)} sub="Signed date or paid stage proxy" help="Uses agreement_signed_at or explicitly paid/signed pipeline statuses." tone="green" />
@@ -1125,7 +1125,7 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
 
       <Panel title="Relevant strict rate by service">
         <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-          Relevant strict rate = leads where CRM field <strong>Relevant</strong> is exactly <strong>Relevant</strong> divided by all clean leads in that service direction for the selected global date range.
+          Relevant strict rate = consolidated leads whose latest filled CRM field <strong>Relevant</strong> is exactly <strong>Relevant</strong>, divided by all clean leads in that service direction for the selected global date range.
         </div>
         <div style={{ height: Math.max(360, conversionAnalytics.serviceRows.length * 64) }}>
           <ResponsiveContainer width="100%" height="100%">
@@ -1606,7 +1606,7 @@ function FinancialReport({
         <div>
           <h2 className="text-lg font-semibold text-slate-950">Marketing & sales funnel</h2>
           <p className="mt-1 text-sm text-slate-600">
-            Latest available finance month: <strong>{months[0]?.label}</strong>. CRM created leads are raw CRM rows by `Дата створення`; Clean leads remove duplicates and obvious technical/system records; finance leads are shown only as validation.
+            Latest available finance month: <strong>{months[0]?.label}</strong>. CRM created leads are raw CRM rows by `Дата створення`; Clean leads consolidate duplicate histories and remove obvious technical/system records; finance leads are shown only as validation.
           </p>
         </div>
         <select
@@ -1624,7 +1624,7 @@ function FinancialReport({
         <KpiCard label="Sessions" value={activeMonth.sessions ? formatNumber(activeMonth.sessions) : "n/a"} sub="Website sessions from finance" help="Total website sessions recorded in the selected month on the Main numbers sheet. It is shown only when the finance workbook contains the # of sessions block." />
         <KpiCard label="Clicks" value={formatNumber(activeMonth.clicks)} sub="All traffic clicks from finance" help="Total clicks from the monthly finance funnel, not only CRM rows." />
         <KpiCard label="CRM created leads" value={formatNumber(crmCreatedLeads)} sub="Raw CRM rows by creation date" help="All CRM records where `Дата створення` falls in the selected month, before cleanup." tone="blue" />
-        <KpiCard label="Clean leads" value={formatNumber(cleanLeads)} sub={`${formatNumber(Math.max(0, crmCreatedLeads - cleanLeads))} removed by cleanup`} help="CRM-created records after removing duplicates and obvious technical/system/test records. This is the default lead base for management metrics." tone="green" />
+        <KpiCard label="Clean leads" value={formatNumber(cleanLeads)} sub={`${formatNumber(Math.max(0, crmCreatedLeads - cleanLeads))} duplicate/technical rows consolidated or removed`} help="One analytical lead per identity and service in a 30-day window. Duplicate histories are consolidated: earliest attributable source, first creation date, latest filled Relevant value, current working status, and all reached funnel dates." tone="green" />
         <KpiCard label="Finance leads" value={financeLeads ? formatNumber(financeLeads) : "n/a"} sub="Finance file validation" help="Lead count from Jonas finance file, used as a comparison check, not as the default CRM funnel base." tone="blue" />
         <KpiCard label="Signed contracts" value={formatNumber(activeMonth.signedContracts)} sub={`${formatNumber(activeMonth.ltContracts)} LT · ${formatNumber(activeMonth.lvContracts)} LV · ${formatNumber(activeMonth.rbiContracts)} other/RBI`} help="Signed contracts from the finance workbook. Other/RBI is the remaining contracts after LT and LV where no separate RBI contract field exists." tone="green" />
         <KpiCard label="Sales" value={formatCurrency(activeMonth.sales)} sub="Signed contract value" help="Sales means contract value signed in the month, not cash received." tone="green" />
@@ -1649,7 +1649,7 @@ function FinancialReport({
       ) : null}
 
       <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
-        Cleanup rules in current date range: duplicates <strong>{formatNumber(cleanupResult.excluded.duplicate)}</strong>, technical/system <strong>{formatNumber(cleanupResult.excluded.technical)}</strong>, invalid identity <strong>{formatNumber(cleanupResult.excluded.invalid)}</strong>, test/demo <strong>{formatNumber(cleanupResult.excluded.test)}</strong>.
+        Cleanup audit for the current date range: duplicate rows consolidated/excluded <strong>{formatNumber(cleanupResult.excluded.duplicate)}</strong>, technical/system <strong>{formatNumber(cleanupResult.excluded.technical)}</strong>, invalid identity <strong>{formatNumber(cleanupResult.excluded.invalid)}</strong>, test/demo <strong>{formatNumber(cleanupResult.excluded.test)}</strong>.
       </div>
 
       <Panel title="Financial funnel">
@@ -1975,6 +1975,8 @@ export default function Home() {
     };
   }, []);
 
+  const fullCleanupResult = useMemo<LeadCleanupResult>(() => cleanLeadRecords(records), [records]);
+
   const dateFilteredRawRecords = useMemo(() => {
     const fromDate = dateFromInput(dateRange.from);
     const toDate = dateFromInput(dateRange.to, true);
@@ -1988,8 +1990,26 @@ export default function Home() {
     });
   }, [dateRange.from, dateRange.to, records]);
 
-  const cleanupResult = useMemo<LeadCleanupResult>(() => cleanLeadRecords(dateFilteredRawRecords), [dateFilteredRawRecords]);
-  const dateAndQualityFilteredRecords = uniqueOnly ? cleanupResult.records : dateFilteredRawRecords;
+  const dateFilteredCleanRecords = useMemo(() => {
+    const fromDate = dateFromInput(dateRange.from);
+    const toDate = dateFromInput(dateRange.to, true);
+
+    return fullCleanupResult.records.filter((record) => {
+      if (!fromDate && !toDate) return true;
+      if (!record.createdAt) return false;
+      if (fromDate && record.createdAt < fromDate) return false;
+      if (toDate && record.createdAt > toDate) return false;
+      return true;
+    });
+  }, [dateRange.from, dateRange.to, fullCleanupResult.records]);
+
+  const cleanupAudit = useMemo<LeadCleanupResult>(() => cleanLeadRecords(dateFilteredRawRecords), [dateFilteredRawRecords]);
+  const cleanupResult = useMemo<LeadCleanupResult>(() => ({
+    ...cleanupAudit,
+    records: dateFilteredCleanRecords,
+    cleanCount: dateFilteredCleanRecords.length,
+  }), [cleanupAudit, dateFilteredCleanRecords]);
+  const dateAndQualityFilteredRecords = uniqueOnly ? dateFilteredCleanRecords : dateFilteredRawRecords;
 
   const serviceOptions = useMemo(
     () => [...new Set(dateAndQualityFilteredRecords.map((record) => record.reportingService))]
@@ -2303,7 +2323,7 @@ export default function Home() {
                     ? "border-blue-600 bg-blue-50 text-blue-700"
                     : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50",
                 )}
-                title="Clean leads remove duplicates and obvious technical/system records. CRM created leads shows raw CRM-created rows for the selected date range."
+                title="Clean leads consolidate duplicate CRM histories into one analytical lead, retain the earliest attributable source and latest filled Relevant value, and remove obvious technical/system records. CRM created leads shows raw rows."
               >
                 {uniqueOnly ? "Clean leads" : "CRM created leads"}
               </button>

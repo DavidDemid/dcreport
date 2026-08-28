@@ -1,4 +1,4 @@
-import { CRMRecord, compactDate, leadIdentityKey, monthDiff, monthKey, monthLabel } from "./crm";
+import { CRMRecord, compactDate, isDuplicateFlag, leadIdentityKey, monthDiff, monthKey, monthLabel } from "./crm";
 import { FinanceData } from "./finance";
 
 export type BucketRow = {
@@ -215,7 +215,7 @@ function status(record: CRMRecord): string {
 }
 
 export function isDuplicate(record: CRMRecord): boolean {
-  return record.duplicateFlag.toLowerCase() === "true";
+  return isDuplicateFlag(record.duplicateFlag) || record.rejectionReason.trim().toUpperCase() === "DOUBLE";
 }
 
 function duplicateIdentityCount(records: CRMRecord[]): number {
