@@ -69,17 +69,29 @@ function identityText(value: string): string {
     .trim();
 }
 
+function identityEmail(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? normalized : "";
+}
+
+function usableIdentityText(value: string): string {
+  const normalized = identityText(value);
+  if (!normalized) return "";
+  if (["unknown", "n a", "na", "none", "null", "website form", "lead", "task.counterparty.name"].includes(normalized)) return "";
+  return normalized;
+}
+
 export function leadIdentityKey(record: Pick<CRMRecord, "email" | "googleClientId" | "counterparty" | "title" | "id" | "rowNumber">): string {
-  const email = identityText(record.email);
+  const email = identityEmail(record.email);
   if (email) return `email:${email}`;
 
-  const googleClientId = identityText(record.googleClientId);
+  const googleClientId = usableIdentityText(record.googleClientId);
   if (googleClientId) return `gclid:${googleClientId}`;
 
-  const counterparty = identityText(record.counterparty);
+  const counterparty = usableIdentityText(record.counterparty);
   if (counterparty) return `counterparty:${counterparty}`;
 
-  const title = identityText(record.title);
+  const title = usableIdentityText(record.title);
   if (title) return `title:${title}`;
 
   return record.id ? `id:${record.id}` : `row:${record.rowNumber}`;
@@ -95,9 +107,18 @@ export type LeadCleanupResult = {
 };
 
 const DEDUPE_WINDOW_MS = 30 * DAY_MS;
+const MAX_SAFE_IDENTITY_GROUP_SIZE = 25;
 
 function leadDedupeKey(record: CRMRecord): string {
   return `${leadIdentityKey(record)}|||${record.reportingService}`;
+}
+
+function secondaryIdentityKey(record: CRMRecord): string {
+  const counterparty = usableIdentityText(record.counterparty);
+  if (counterparty) return `counterparty:${counterparty}`;
+  const title = usableIdentityText(record.title);
+  if (title) return `title:${title}`;
+  return record.id ? `id:${record.id}` : `row:${record.rowNumber}`;
 }
 
 export function isDuplicateFlag(value: string): boolean {
@@ -112,10 +133,11 @@ function isDuplicateClosure(record: CRMRecord): boolean {
 
 function hasUsableIdentity(record: CRMRecord): boolean {
   return Boolean(
-    identityText(record.email)
-    || identityText(record.googleClientId)
-    || identityText(record.counterparty)
-    || identityText(record.title),
+    identityEmail(record.email)
+    || usableIdentityText(record.googleClientId)
+    || usableIdentityText(record.counterparty)
+    || usableIdentityText(record.title)
+    || record.id.trim(),
   );
 }
 
@@ -127,7 +149,6 @@ function technicalReason(record: CRMRecord): LeadCleanupRule | null {
     record.sourceRaw,
     record.source,
     record.type,
-    record.status,
     record.rejectionReason,
     email,
   ].join(" ").toLowerCase();
@@ -138,7 +159,7 @@ function technicalReason(record: CRMRecord): LeadCleanupRule | null {
     email.startsWith("noreply@")
     || email.startsWith("no-reply@")
     || email.startsWith("support@")
-    || /\b(wise|noreply|no-reply|notification|system|internal mail|planfix|2invoice|payment notification|automated service|maxeltracker)\b/.test(haystack)
+    || /\b(wise|noreply|no-reply|notification|system|planfix|2invoice|payment notification|automated service|maxeltracker)\b/.test(haystack)
   ) {
     return "technical";
   }
@@ -196,6 +217,7 @@ function consolidateLeadCluster(cluster: CRMRecord[]): CRMRecord {
     googleClientId: latestText(sorted, (record) => record.googleClientId),
     language: latestKnownText(currentCandidates, (record) => record.language) || "Unknown",
     email: latestText(sorted, (record) => record.email),
+    rejectionReason: current.rejectionReason.trim().toUpperCase() === "DOUBLE" ? "" : current.rejectionReason,
     completedAt: firstDate(sorted, (record) => record.completedAt),
     agreementSentAt: firstDate(sorted, (record) => record.agreementSentAt),
     agreementSignedAt: firstDate(sorted, (record) => record.agreementSignedAt),
@@ -260,19 +282,31 @@ export function cleanLeadRecords(records: CRMRecord[]): LeadCleanupResult {
     grouped.set(key, [...(grouped.get(key) ?? []), record]);
   }
 
+  const safeGroups: CRMRecord[][] = [];
+  for (const [key, group] of grouped.entries()) {
+    if (group.length <= MAX_SAFE_IDENTITY_GROUP_SIZE) {
+      safeGroups.push(group);
+      continue;
+    }
+
+    const subdivided = new Map<string, CRMRecord[]>();
+    for (const record of group) {
+      const secondaryKey = `${key}|||${secondaryIdentityKey(record)}`;
+      subdivided.set(secondaryKey, [...(subdivided.get(secondaryKey) ?? []), record]);
+    }
+    safeGroups.push(...subdivided.values());
+  }
+
   const clean: CRMRecord[] = [];
-  for (const group of grouped.values()) {
+  for (const group of safeGroups) {
     const sorted = [...group].sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0) || a.rowNumber - b.rowNumber);
     let cluster: CRMRecord[] = [];
     let clusterStart = 0;
 
     const flushCluster = () => {
       if (!cluster.length) return;
-      if (cluster.every(isDuplicateClosure)) {
-        excluded.duplicate += cluster.length;
-        cluster = [];
-        return;
-      }
+      // A duplicate flag is evidence for consolidation, not enough evidence to
+      // delete a person when the matching primary CRM row is absent.
       clean.push(consolidateLeadCluster(cluster));
       excluded.duplicate += cluster.length - 1;
       cluster = [];
@@ -333,6 +367,16 @@ export function parseCRMDate(value: RawCell): Date | null {
 
 function pick(row: RawCell[], index: number): RawCell {
   return row[index] ?? "";
+}
+
+function normalizedHeader(value: RawCell): string {
+  return text(value).replace(/^\uFEFF/, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function headerIndex(headers: RawCell[], names: string[], fallback: number): number {
+  const targets = new Set(names.map((name) => normalizedHeader(name)));
+  const index = headers.findIndex((header) => targets.has(normalizedHeader(header)));
+  return index >= 0 ? index : fallback;
 }
 
 function parseUtmSource(utmTag: string): string {
@@ -451,61 +495,105 @@ function normalizeReportingService(value: string): string {
 }
 
 export function normalizeRows(rows: RawCell[][]): CRMRecord[] {
+  const headers = rows[0] ?? [];
+  const columns = {
+    id: headerIndex(headers, ["Номер", "Number", "ID"], 0),
+    counterparty: headerIndex(headers, ["Контрагент", "Counterparty"], 1),
+    title: headerIndex(headers, ["Назва", "Title", "Lead name"], 2),
+    createdAt: headerIndex(headers, ["Дата створення", "Creation date", "Created at", "created_at"], 3),
+    status: headerIndex(headers, ["Статус", "Status"], 4),
+    relevant: headerIndex(headers, ["Relevant"], 5),
+    assignee: headerIndex(headers, ["Виконавці", "Assignees", "Assignee"], 6),
+    service: headerIndex(headers, ["Service (group)", "Service group"], 7),
+    country: headerIndex(headers, ["Country"], 8),
+    utmTag: headerIndex(headers, ["UTM tag"], 9),
+    googleClientId: headerIndex(headers, ["Google Client ID", "google_client_id"], 10),
+    language: headerIndex(headers, ["LANGUAGE", "Language"], 11),
+    type: headerIndex(headers, ["Type"], 12),
+    email: headerIndex(headers, ["E-mail Counterparty", "Email Counterparty", "E-mail", "Email"], 13),
+    rejectionReason: headerIndex(headers, ["Reason for Rejection", "Rejection reason"], 14),
+    legacySource: headerIndex(headers, ["Name"], 15),
+    utmMediumLegacy: headerIndex(headers, ["utm_medium"], 18),
+    completedAt: headerIndex(headers, ["Дата отримання статусу «Завершене»", "Completed at", "completed_at"], 20),
+    agreementSentAt: headerIndex(headers, ["agreement_sent_at"], 21),
+    agreementSignedAt: headerIndex(headers, ["agreement_signed_at"], 23),
+    dealValueActual: headerIndex(headers, ["deal_value_actual"], 25),
+    duplicateFlag: headerIndex(headers, ["duplicate_flag"], 26),
+    firstContactAt: headerIndex(headers, ["first_contact_at"], 27),
+    firstPaymentAt: headerIndex(headers, ["first_payment_at"], 28),
+    firstResponseAt: headerIndex(headers, ["first_response_at"], 29),
+    firstTouchCampaign: headerIndex(headers, ["first_touch_campaign"], 30),
+    firstTouchContent: headerIndex(headers, ["first_touch_content"], 31),
+    firstTouchMedium: headerIndex(headers, ["first_touch_medium"], 32),
+    firstTouchSource: headerIndex(headers, ["first_touch_source"], 33),
+    fullPaymentAt: headerIndex(headers, ["full_payment_at"], 35),
+    lawyerHandoverAt: headerIndex(headers, ["lawyer_handover_at"], 37),
+    lostAt: headerIndex(headers, ["lost_at"], 39),
+    meetingBookedAt: headerIndex(headers, ["meeting_booked_at"], 40),
+    meetingHeldAt: headerIndex(headers, ["meeting_held_at"], 41),
+    originalServiceInterest: headerIndex(headers, ["original_service_interest"], 42),
+    paymentStatus: headerIndex(headers, ["payment_status"], 47),
+    qualifiedService: headerIndex(headers, ["qualified_service"], 48),
+    utmCampaign: headerIndex(headers, ["utm_campaign"], 54),
+    utmContent: headerIndex(headers, ["utm_content"], 55),
+    utmSource: headerIndex(headers, ["utm_source"], 56),
+  };
+
   return rows
     .slice(1)
     .map((row, rowIndex) => {
-      const sourceName = text(pick(row, 15));
-      const firstTouchSource = text(pick(row, 33));
-      const utmSource = text(pick(row, 56));
-      const utmTag = text(pick(row, 9));
-      const serviceGroup = text(pick(row, 7)) || "Unknown";
-      const originalServiceInterest = text(pick(row, 42));
-      const qualifiedService = text(pick(row, 48));
+      const sourceName = text(pick(row, columns.legacySource));
+      const firstTouchSource = text(pick(row, columns.firstTouchSource));
+      const utmSource = text(pick(row, columns.utmSource));
+      const utmTag = text(pick(row, columns.utmTag));
+      const serviceGroup = text(pick(row, columns.service)) || "Unknown";
+      const originalServiceInterest = text(pick(row, columns.originalServiceInterest));
+      const qualifiedService = text(pick(row, columns.qualifiedService));
       const sourceInfo = inferSource(sourceName, firstTouchSource, utmSource, utmTag);
       const serviceInfo = inferAnalyticsService(serviceGroup, originalServiceInterest, qualifiedService);
 
       return {
         rowNumber: rowIndex + 2,
-        id: text(pick(row, 0)).replace(/\.0+$/, ""),
-        counterparty: text(pick(row, 1)),
-        title: text(pick(row, 2)),
-        createdAt: parseCRMDate(pick(row, 3)),
-        status: text(pick(row, 4)) || "Unknown",
-        relevant: text(pick(row, 5)),
-        assignee: text(pick(row, 6)),
+        id: text(pick(row, columns.id)).replace(/\.0+$/, ""),
+        counterparty: text(pick(row, columns.counterparty)),
+        title: text(pick(row, columns.title)),
+        createdAt: parseCRMDate(pick(row, columns.createdAt)),
+        status: text(pick(row, columns.status)) || "Unknown",
+        relevant: text(pick(row, columns.relevant)),
+        assignee: text(pick(row, columns.assignee)),
         service: serviceGroup,
-        country: text(pick(row, 8)) || "Unknown",
+        country: text(pick(row, columns.country)) || "Unknown",
         utmTag,
-        googleClientId: text(pick(row, 10)),
-        language: text(pick(row, 11)) || "Unknown",
-        type: text(pick(row, 12)),
-        email: text(pick(row, 13)),
-        rejectionReason: text(pick(row, 14)),
+        googleClientId: text(pick(row, columns.googleClientId)),
+        language: text(pick(row, columns.language)) || "Unknown",
+        type: text(pick(row, columns.type)),
+        email: text(pick(row, columns.email)),
+        rejectionReason: text(pick(row, columns.rejectionReason)),
         ...sourceInfo,
-        completedAt: parseCRMDate(pick(row, 20)),
-        agreementSentAt: parseCRMDate(pick(row, 21)),
-        agreementSignedAt: parseCRMDate(pick(row, 23)),
-        dealValueActual: numberValue(pick(row, 25)),
-        duplicateFlag: text(pick(row, 26)),
-        firstContactAt: parseCRMDate(pick(row, 27)),
-        firstPaymentAt: parseCRMDate(pick(row, 28)),
-        firstResponseAt: parseCRMDate(pick(row, 29)),
-        firstTouchCampaign: text(pick(row, 30)),
-        firstTouchContent: text(pick(row, 31)),
-        firstTouchMedium: text(pick(row, 32)),
+        completedAt: parseCRMDate(pick(row, columns.completedAt)),
+        agreementSentAt: parseCRMDate(pick(row, columns.agreementSentAt)),
+        agreementSignedAt: parseCRMDate(pick(row, columns.agreementSignedAt)),
+        dealValueActual: numberValue(pick(row, columns.dealValueActual)),
+        duplicateFlag: text(pick(row, columns.duplicateFlag)),
+        firstContactAt: parseCRMDate(pick(row, columns.firstContactAt)),
+        firstPaymentAt: parseCRMDate(pick(row, columns.firstPaymentAt)),
+        firstResponseAt: parseCRMDate(pick(row, columns.firstResponseAt)),
+        firstTouchCampaign: text(pick(row, columns.firstTouchCampaign)),
+        firstTouchContent: text(pick(row, columns.firstTouchContent)),
+        firstTouchMedium: text(pick(row, columns.firstTouchMedium)),
         firstTouchSource,
-        fullPaymentAt: parseCRMDate(pick(row, 35)),
-        lawyerHandoverAt: parseCRMDate(pick(row, 37)),
-        lostAt: parseCRMDate(pick(row, 39)),
-        meetingBookedAt: parseCRMDate(pick(row, 40)),
-        meetingHeldAt: parseCRMDate(pick(row, 41)),
+        fullPaymentAt: parseCRMDate(pick(row, columns.fullPaymentAt)),
+        lawyerHandoverAt: parseCRMDate(pick(row, columns.lawyerHandoverAt)),
+        lostAt: parseCRMDate(pick(row, columns.lostAt)),
+        meetingBookedAt: parseCRMDate(pick(row, columns.meetingBookedAt)),
+        meetingHeldAt: parseCRMDate(pick(row, columns.meetingHeldAt)),
         originalServiceInterest,
-        paymentStatus: text(pick(row, 47)),
+        paymentStatus: text(pick(row, columns.paymentStatus)),
         qualifiedService,
         ...serviceInfo,
-        utmCampaign: text(pick(row, 54)),
-        utmContent: text(pick(row, 55)),
-        utmMedium: text(pick(row, 18)) || text(pick(row, 32)),
+        utmCampaign: text(pick(row, columns.utmCampaign)),
+        utmContent: text(pick(row, columns.utmContent)),
+        utmMedium: text(pick(row, columns.utmMediumLegacy)) || text(pick(row, columns.firstTouchMedium)),
         utmSource,
       };
     })

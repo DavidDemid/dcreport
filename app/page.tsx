@@ -59,6 +59,7 @@ const DB_VERSION = 1;
 const FILE_STORE = "files";
 const CRM_FILE_KEY = "crm-v3";
 const FINANCE_FILE_KEY = "finance-april-2026";
+const CRM_DATA_MODEL_VERSION = "2026-09-01-header-mapped-dedupe-v2";
 
 const panelHelp: Record<string, string> = {
   "Monthly trend": "Shows how lead volume, active-qualified leads, rejected leads, and clients changed by lead creation month.",
@@ -1649,7 +1650,7 @@ function FinancialReport({
       ) : null}
 
       <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
-        Cleanup audit for the current date range: duplicate rows consolidated/excluded <strong>{formatNumber(cleanupResult.excluded.duplicate)}</strong>, technical/system <strong>{formatNumber(cleanupResult.excluded.technical)}</strong>, invalid identity <strong>{formatNumber(cleanupResult.excluded.invalid)}</strong>, test/demo <strong>{formatNumber(cleanupResult.excluded.test)}</strong>.
+        Cleanup audit for the current date range: duplicate rows consolidated <strong>{formatNumber(cleanupResult.excluded.duplicate)}</strong>, technical/system <strong>{formatNumber(cleanupResult.excluded.technical)}</strong>, invalid identity <strong>{formatNumber(cleanupResult.excluded.invalid)}</strong>, test/demo <strong>{formatNumber(cleanupResult.excluded.test)}</strong>.
       </div>
 
       <Panel title="Financial funnel">
@@ -1916,6 +1917,7 @@ function ReportPage({ title, children }: { title: string; children: ReactNode })
 }
 
 export default function Home() {
+  const dataModelVersion = CRM_DATA_MODEL_VERSION;
   const [records, setRecords] = useState<CRMRecord[]>([]);
   const [financeData, setFinanceData] = useState<FinanceData | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
@@ -1973,7 +1975,7 @@ export default function Home() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [dataModelVersion]);
 
   const fullCleanupResult = useMemo<LeadCleanupResult>(() => cleanLeadRecords(records), [records]);
 
