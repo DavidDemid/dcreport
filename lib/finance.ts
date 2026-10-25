@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 type RawCell = string | number | boolean | Date | null | undefined;
 
 export type FinanceMonthlyRecord = {
+  availableFields?: string[];
   month: string;
   revenue: number;
   marketingCost: number;
@@ -297,6 +298,16 @@ function parseMainNumbers(rows: RawCell[][]): FinanceMonthlyRecord[] {
       ltContracts: lt,
       lvContracts: lv,
       rbiContracts: Math.max(0, signedContracts - lt - lv),
+      availableFields: Object.entries({
+        revenue: revenueActual, marketingCost: marketingActual, profitAfterMarketing: profitActual,
+        signedContracts: contractsActual, sessions: sessionsActual, clicks: clicksActual,
+        leads: leadsActual, paidTrafficCost: paidTraffic, sales: salesActual,
+        planProfitAfterMarketing: profitPlan, planProfitAfterMarketing3MonthAverage: profitPlanAverage,
+        avgProfitAfterMarketing: profitAverage, avgRevenue: revenueAverage, avgSales: salesAverage,
+        avgMarketingCost: marketingAverage, avgPaidTrafficCost: paidTrafficAverage,
+        avgSignedContracts: contractsAverage, avgSessions: sessionsAverage, avgLeads: leadsAverage, avgClicks: clicksAverage,
+        ltContracts, lvContracts,
+      }).filter(([, row]) => row && text(row[column]) !== "").map(([field]) => field),
     };
     const hasActualData = [
       record.revenue,
@@ -333,8 +344,9 @@ function parseMainNumberChannelCosts(rows: RawCell[][]): FinanceChannelCostRecor
       if (!row) continue;
       for (let column = 1; column < header.length; column += 1) {
         const month = parseMonthKey(header[column]);
-        const amount = rowValue(row, column);
-        if (!month || amount <= 0) continue;
+        const rawAmount = text(row[column]).replace(/\s/g, "").replace(",", ".");
+        const amount = rawAmount ? Number(rawAmount) : NaN;
+        if (!month || !Number.isFinite(amount) || amount < 0) continue;
         records.push({ month, category: text(row[0]), source: category.source, amount });
       }
     }

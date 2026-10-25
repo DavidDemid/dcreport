@@ -2,6 +2,13 @@
 
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ReportSwitcher } from "@/components/report-switcher";
+import { LanguageSelector, translateReportNode, useReportLanguage } from "@/components/report-language";
+import { renderPdfHeading } from "@/lib/pdf-heading";
+import { DateRangePicker } from "@/components/date-range-picker";
+import { EvidenceButton } from "@/components/metric-data-drawer";
+import { buildPlanfixMetricEvidence, planfixMetricDescription, type PlanfixMetricKey } from "@/lib/planfix-metric-evidence";
+import type { MetricEvidence } from "@/lib/metric-evidence";
 import {
   Activity,
   BarChart3,
@@ -274,7 +281,8 @@ async function loadReportFile(key: string): Promise<{ name: string; buffer: Arra
 }
 
 function EmptyState() {
-  return (
+  const { t } = useReportLanguage();
+  return translateReportNode((
     <main className="flex min-h-screen items-center justify-center bg-[#f7f8fa] p-6">
       <section className="w-full max-w-xl rounded-lg border border-slate-200 bg-white p-8 text-center shadow-sm">
         <FileSpreadsheet className="mx-auto h-10 w-10 text-slate-500" />
@@ -282,7 +290,7 @@ function EmptyState() {
         <p className="mt-2 text-sm text-slate-600">Loading the current CRM export...</p>
       </section>
     </main>
-  );
+  ), t);
 }
 
 function KpiCard({
@@ -290,14 +298,19 @@ function KpiCard({
   value,
   sub,
   help,
+  explanation,
+  evidence,
   tone = "blue",
 }: {
   label: string;
   value: string;
   sub: string;
   help?: string;
+  explanation?: string;
+  evidence?: MetricEvidence | (() => MetricEvidence);
   tone?: "blue" | "green" | "amber" | "red";
 }) {
+  const { t } = useReportLanguage();
   const toneClass = {
     blue: "border-blue-200 bg-blue-50 text-blue-700",
     green: "border-emerald-200 bg-emerald-50 text-emerald-700",
@@ -306,40 +319,46 @@ function KpiCard({
   }[tone];
   const helpText = help ?? sub;
 
-  return (
-    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-      <div className={clsx("kpi-label mb-4 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-semibold", toneClass)}>
-        <span className="kpi-label-text">{label}</span>
-        {helpText ? (
-          <span className="pdf-ignore" title={helpText}>
-            <Info className="h-3.5 w-3.5" aria-label={helpText} />
-          </span>
-        ) : null}
+  return translateReportNode((
+    <section data-metric-card={label} className="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
+        <div className={clsx("kpi-label inline-flex min-w-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-semibold", toneClass)}>
+          <span className="kpi-label-text">{label}</span>
+          {helpText ? (
+            <span className="pdf-ignore" title={helpText}>
+              <Info className="h-3.5 w-3.5" aria-label={helpText} />
+            </span>
+          ) : null}
+        </div>
+        {evidence && <div className="pdf-ignore shrink-0"><EvidenceButton evidence={evidence} /></div>}
       </div>
       <div className="pdf-kpi-label hidden text-sm font-semibold text-slate-950">{label}</div>
       <div className="text-3xl font-semibold text-slate-950">{value}</div>
       <div className="mt-2 text-sm text-slate-600">{sub}</div>
+      {(explanation ?? helpText) && <p className="mt-3 text-xs leading-5 text-slate-500">{explanation ?? helpText}</p>}
     </section>
-  );
+  ), t);
 }
 
 function InfoHint({ text }: { text: string }) {
-  return (
+  const { t } = useReportLanguage();
+  return translateReportNode((
     <span
       title={text}
       className="pdf-ignore inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-500"
     >
       <Info className="h-3.5 w-3.5" aria-label={text} />
     </span>
-  );
+  ), t);
 }
 
 function Note({ children }: { children: React.ReactNode }) {
-  return (
+  const { t } = useReportLanguage();
+  return translateReportNode((
     <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-800">
       {children}
     </div>
-  );
+  ), t);
 }
 
 function Panel({
@@ -355,9 +374,10 @@ function Panel({
   help?: string;
   exportSplit?: boolean;
 }) {
+  const { t } = useReportLanguage();
   const helpText = help ?? panelHelp[title];
 
-  return (
+  return translateReportNode((
     <section className={clsx("rounded-lg border border-slate-200 bg-white p-5 shadow-sm", exportSplit && "pdf-split-ok")}>
       <div className="mb-4 flex items-center justify-between gap-4">
         <div className="flex min-w-0 items-center gap-2">
@@ -368,15 +388,16 @@ function Panel({
       </div>
       {children}
     </section>
-  );
+  ), t);
 }
 
 function PercentBar({ value, color = "bg-blue-600" }: { value: number; color?: string }) {
-  return (
+  const { t } = useReportLanguage();
+  return translateReportNode((
     <div className="h-2 w-full rounded-full bg-slate-100">
       <div className={clsx("h-2 rounded-full", color)} style={{ width: `${Math.min(value * 100, 100)}%` }} />
     </div>
-  );
+  ), t);
 }
 
 function ServiceFilter({
@@ -388,6 +409,7 @@ function ServiceFilter({
   selected: string[];
   onChange: (services: string[]) => void;
 }) {
+  const { t } = useReportLanguage();
   const allSelected = !selected.length || selected.length === options.length;
   const label = allSelected
     ? "All services"
@@ -403,7 +425,7 @@ function ServiceFilter({
     onChange(next.length === options.length ? [] : next);
   }
 
-  return (
+  return translateReportNode((
     <details className="relative">
       <summary className="flex h-10 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">
         <Filter className="h-4 w-4" />
@@ -435,7 +457,7 @@ function ServiceFilter({
         </div>
       </div>
     </details>
-  );
+  ), t);
 }
 
 function ChannelFilter({
@@ -447,6 +469,7 @@ function ChannelFilter({
   selected: string[];
   onChange: (channels: string[]) => void;
 }) {
+  const { t } = useReportLanguage();
   const allSelected = !selected.length || selected.length === options.length;
   const label = allSelected
     ? "All channels"
@@ -462,7 +485,7 @@ function ChannelFilter({
     onChange(next.length === options.length ? [] : next);
   }
 
-  return (
+  return translateReportNode((
     <details className="relative">
       <summary className="flex h-10 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50">
         <Filter className="h-4 w-4" />
@@ -494,7 +517,7 @@ function ChannelFilter({
         </div>
       </div>
     </details>
-  );
+  ), t);
 }
 
 type ReportScope = {
@@ -508,9 +531,10 @@ type ReportScope = {
 };
 
 function FilterSummary({ scope, onReset }: { scope: ReportScope; onReset?: () => void }) {
+  const { t } = useReportLanguage();
   if (!scope.hasActiveFilters) return null;
 
-  return (
+  return translateReportNode((
     <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -530,11 +554,16 @@ function FilterSummary({ scope, onReset }: { scope: ReportScope; onReset?: () =>
         ) : null}
       </div>
     </div>
-  );
+  ), t);
 }
 
-function Overview({ analytics, scope, onResetFilters }: { analytics: Analytics; scope: ReportScope; onResetFilters?: () => void }) {
-  return (
+function Overview({ analytics, records, scope, onResetFilters }: { analytics: Analytics; records: CRMRecord[]; scope: ReportScope; onResetFilters?: () => void }) {
+  const { t, language } = useReportLanguage();
+  const evidenceFor = (metric: PlanfixMetricKey) => () => buildPlanfixMetricEvidence(metric, records, {
+    language,
+    scope: [analytics.dateRange, t(scope.filterDescription)].filter(Boolean).join(" | "),
+  });
+  return translateReportNode((
     <div className="space-y-5">
       <FilterSummary scope={scope} onReset={onResetFilters} />
 
@@ -544,10 +573,12 @@ function Overview({ analytics, scope, onResetFilters }: { analytics: Analytics; 
           value={formatNumber(analytics.total)}
           sub={`${analytics.dateRange} · ${formatNumber(analytics.uniqueTotal)} unique · ${formatNumber(scope.rawTotal)} rows in CRM file`}
           help="Leads in the current report view after date, unique, and service filters. The full CRM file total is shown in the subtitle."
+          explanation={planfixMetricDescription("leads", language)}
+          evidence={evidenceFor("leads")}
         />
-        <KpiCard label="Relevant rate" value={formatPercent(analytics.relevantStrictRate)} sub="Strict: Relevant = Relevant" help="Strict metric from the Relevant field only." tone="green" />
-        <KpiCard label="Rejected rate" value={formatPercent(analytics.rejectedRate)} sub="Rejected or lost leads" help="Rejected leads divided by all leads in the current filter. Uses Rejected status or lost_at." tone="red" />
-        <KpiCard label="Client rate" value={formatPercent(analytics.clientRate)} sub="First payment date or payment proxy" help="Client means first payment reached. If payment date is empty, status/payment_status can still mark the lead as client." tone="amber" />
+        <KpiCard label="Relevant rate" value={formatPercent(analytics.relevantStrictRate)} sub="Strict: Relevant = Relevant" help="Strict metric from the Relevant field only." explanation={planfixMetricDescription("relevant", language)} evidence={evidenceFor("relevant")} tone="green" />
+        <KpiCard label="Rejected rate" value={formatPercent(analytics.rejectedRate)} sub="Rejected or lost leads" help="Rejected leads divided by all leads in the current filter. Uses Rejected status or lost_at." explanation={planfixMetricDescription("rejected", language)} evidence={evidenceFor("rejected")} tone="red" />
+        <KpiCard label="Client rate" value={formatPercent(analytics.clientRate)} sub="First payment date or payment proxy" help="Client means first payment reached. If payment date is empty, status/payment_status can still mark the lead as client." explanation={planfixMetricDescription("clients", language)} evidence={evidenceFor("clients")} tone="amber" />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
@@ -568,10 +599,10 @@ function Overview({ analytics, scope, onResetFilters }: { analytics: Analytics; 
                 <YAxis tick={{ fontSize: 12 }} />
                 <Tooltip />
                 <Legend />
-                <Bar isAnimationActive={false} dataKey="leads" fill="#2563eb" name="Leads" radius={[3, 3, 0, 0]} />
-                <Line isAnimationActive={false} type="monotone" dataKey="qualifiedActive" stroke="#16a34a" strokeWidth={2} name="Qualified / Active" dot={false} />
-                <Line isAnimationActive={false} type="monotone" dataKey="rejected" stroke="#dc2626" strokeWidth={2} name="Rejected" dot={false} />
-                <Line isAnimationActive={false} type="monotone" dataKey="clients" stroke="#f59e0b" strokeWidth={2} name="Clients" dot={false} />
+                <Bar isAnimationActive={false} dataKey="leads" fill="#2563eb" name={t("Leads")} radius={[3, 3, 0, 0]} />
+                <Line isAnimationActive={false} type="monotone" dataKey="qualifiedActive" stroke="#16a34a" strokeWidth={2} name={t("Qualified / Active")} dot={false} />
+                <Line isAnimationActive={false} type="monotone" dataKey="rejected" stroke="#dc2626" strokeWidth={2} name={t("Rejected")} dot={false} />
+                <Line isAnimationActive={false} type="monotone" dataKey="clients" stroke="#f59e0b" strokeWidth={2} name={t("Clients")} dot={false} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -615,9 +646,9 @@ function Overview({ analytics, scope, onResetFilters }: { analytics: Analytics; 
                 }
               />
               <Legend />
-              <Bar isAnimationActive={false} yAxisId="left" dataKey="marketingSpend" fill="#2563eb" name="Marketing spend" radius={[3, 3, 0, 0]} />
-              <Bar isAnimationActive={false} yAxisId="left" dataKey="revenue" fill="#16a34a" name="Revenue" radius={[3, 3, 0, 0]} />
-              <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="roas" stroke="#f59e0b" strokeWidth={2} name="ROAS" dot={false} />
+              <Bar isAnimationActive={false} yAxisId="left" dataKey="marketingSpend" fill="#2563eb" name={t("Marketing spend")} radius={[3, 3, 0, 0]} />
+              <Bar isAnimationActive={false} yAxisId="left" dataKey="revenue" fill="#16a34a" name={t("Revenue")} radius={[3, 3, 0, 0]} />
+              <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="roas" stroke="#f59e0b" strokeWidth={2} name={t("ROAS")} dot={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -653,11 +684,12 @@ function Overview({ analytics, scope, onResetFilters }: { analytics: Analytics; 
         </Panel>
       </div>
     </div>
-  );
+  ), t);
 }
 
 function BucketTable({ rows, kind }: { rows: Analytics["sourceRows"]; kind: "source" | "service" }) {
-  return (
+  const { t } = useReportLanguage();
+  return translateReportNode((
     <div className="overflow-hidden">
       <table className="w-full table-fixed text-xs lg:text-sm">
         <colgroup>
@@ -708,11 +740,12 @@ function BucketTable({ rows, kind }: { rows: Analytics["sourceRows"]; kind: "sou
         </tbody>
       </table>
     </div>
-  );
+  ), t);
 }
 
 function ServiceChannelTable({ rows, showService = true }: { rows: Analytics["serviceChannelRows"]; showService?: boolean }) {
-  return (
+  const { t } = useReportLanguage();
+  return translateReportNode((
     <div className="overflow-hidden">
       <table className="w-full table-fixed text-xs lg:text-sm">
         <colgroup>
@@ -762,10 +795,11 @@ function ServiceChannelTable({ rows, showService = true }: { rows: Analytics["se
         </tbody>
       </table>
     </div>
-  );
+  ), t);
 }
 
 function Sources({ analytics, scope, onResetFilters }: { analytics: Analytics; scope: ReportScope; onResetFilters?: () => void }) {
+  const { t } = useReportLanguage();
   const serviceChannelGroups = useMemo(() => {
     const grouped = new Map<string, Analytics["serviceChannelRows"]>();
     for (const row of analytics.serviceChannelRows) {
@@ -783,7 +817,7 @@ function Sources({ analytics, scope, onResetFilters }: { analytics: Analytics; s
       .sort((a, b) => b.leads - a.leads);
   }, [analytics.serviceChannelRows]);
 
-  return (
+  return translateReportNode((
     <div className="space-y-5">
       <FilterSummary scope={scope} onReset={onResetFilters} />
 
@@ -917,7 +951,7 @@ function Sources({ analytics, scope, onResetFilters }: { analytics: Analytics; s
         </div>
       </Panel>
     </div>
-  );
+  ), t);
 }
 
 function financeForChannels(finance: FinanceData | undefined, selectedChannels: string[]) {
@@ -952,6 +986,7 @@ function financeForChannels(finance: FinanceData | undefined, selectedChannels: 
 }
 
 function Conversion({ analytics, records, finance }: { analytics: Analytics; records: CRMRecord[]; finance?: FinanceData }) {
+  const { t, language } = useReportLanguage();
   const [selectedChannels, setSelectedChannels] = useState<string[]>([]);
   const channelOptions = useMemo(
     () => [...new Set(records.map((record) => record.source || "Unknown"))].sort((a, b) => a.localeCompare(b)),
@@ -967,6 +1002,10 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
     () => (selectedChannels.length ? buildAnalytics(conversionRecords, conversionFinance) : analytics),
     [analytics, conversionFinance, conversionRecords, selectedChannels.length],
   );
+  const evidenceFor = (metric: PlanfixMetricKey) => () => buildPlanfixMetricEvidence(metric, conversionRecords, {
+    language,
+    scope: `${conversionAnalytics.dateRange} | ${t("Channels")}: ${selectedChannels.length ? selectedChannels.join(", ") : t("All channels")}`,
+  });
   const max = conversionAnalytics.funnel[0]?.count || 1;
   const [selectedSource, setSelectedSource] = useState("");
   const sourceOptions = useMemo(() => conversionAnalytics.sourceRows.map((row) => row.name), [conversionAnalytics.sourceRows]);
@@ -984,7 +1023,7 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
     setSelectedChannels((current) => current.filter((channel) => channelOptions.includes(channel)));
   }, [channelOptions]);
 
-  return (
+  return translateReportNode((
     <div className="space-y-5">
       <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -997,14 +1036,14 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Leads" value={formatNumber(conversionAnalytics.total)} sub={`${formatNumber(conversionAnalytics.uniqueTotal)} unique in current filter`} help="Leads after date, service, channel, and Clean/CRM-created mode filters. In Clean mode, duplicate histories are already consolidated before the creation-date filter is applied." />
-        <KpiCard label="Relevant strict" value={formatPercent(conversionAnalytics.relevantStrictRate)} sub="Only Relevant = Relevant" help="Strict metric from the latest filled Relevant field in each consolidated lead history. The original acquisition source is retained from the earliest attributable record." tone="green" />
-        <KpiCard label="Qualified / Active proxy" value={formatPercent(conversionAnalytics.qualifiedActiveRate)} sub="Relevant plus active statuses" help="Hybrid proxy: Relevant field, active statuses, first contact/response." tone="blue" />
-        <KpiCard label="Agreement sent" value={formatPercent(conversionAnalytics.agreementSentRate)} sub="Date or status >= sent" help="Uses agreement_sent_at or pipeline statuses at/after retainer agreement sent." tone="blue" />
-        <KpiCard label="Agreement signed" value={formatPercent(conversionAnalytics.agreementSignedRate)} sub="Signed date or paid stage proxy" help="Uses agreement_signed_at or explicitly paid/signed pipeline statuses." tone="green" />
-        <KpiCard label="First payment" value={formatPercent(conversionAnalytics.clientRate)} sub="Client definition" help="Client = first payment reached, using payment date when present, otherwise payment status proxy." tone="amber" />
-        <KpiCard label="Full payment" value={formatPercent(conversionAnalytics.fullPaidClientRate)} sub="Full-paid client" help="Share of leads that reached full payment or completed status." tone="green" />
-        <KpiCard label="Duplicates" value={formatPercent(conversionAnalytics.duplicateRate)} sub="Repeated identity rows" help="Rows marked duplicate_flag or repeated by email, Google Client ID, counterparty, or title." tone="red" />
+        <KpiCard label="Leads" value={formatNumber(conversionAnalytics.total)} sub={`${formatNumber(conversionAnalytics.uniqueTotal)} unique in current filter`} help="Leads after date, service, channel, and Clean/CRM-created mode filters. In Clean mode, duplicate histories are already consolidated before the creation-date filter is applied." explanation={planfixMetricDescription("leads", language)} evidence={evidenceFor("leads")} />
+        <KpiCard label="Relevant strict" value={formatPercent(conversionAnalytics.relevantStrictRate)} sub="Only Relevant = Relevant" help="Strict metric from the latest filled Relevant field in each consolidated lead history. The original acquisition source is retained from the earliest attributable record." explanation={planfixMetricDescription("relevant", language)} evidence={evidenceFor("relevant")} tone="green" />
+        <KpiCard label="Qualified / Active proxy" value={formatPercent(conversionAnalytics.qualifiedActiveRate)} sub="Relevant plus active statuses" help="Hybrid proxy: Relevant field, active statuses, first contact/response." explanation={planfixMetricDescription("qualified", language)} evidence={evidenceFor("qualified")} tone="blue" />
+        <KpiCard label="Agreement sent" value={formatPercent(conversionAnalytics.agreementSentRate)} sub="Date or status >= sent" help="Uses agreement_sent_at or pipeline statuses at/after retainer agreement sent." explanation={planfixMetricDescription("agreementSent", language)} evidence={evidenceFor("agreementSent")} tone="blue" />
+        <KpiCard label="Agreement signed" value={formatPercent(conversionAnalytics.agreementSignedRate)} sub="Signed date or paid stage proxy" help="Uses agreement_signed_at or explicitly paid/signed pipeline statuses." explanation={planfixMetricDescription("agreementSigned", language)} evidence={evidenceFor("agreementSigned")} tone="green" />
+        <KpiCard label="First payment" value={formatPercent(conversionAnalytics.clientRate)} sub="Client definition" help="Client = first payment reached, using payment date when present, otherwise payment status proxy." explanation={planfixMetricDescription("clients", language)} evidence={evidenceFor("clients")} tone="amber" />
+        <KpiCard label="Full payment" value={formatPercent(conversionAnalytics.fullPaidClientRate)} sub="Full-paid client" help="Share of leads that reached full payment or completed status." explanation={planfixMetricDescription("fullPaid", language)} evidence={evidenceFor("fullPaid")} tone="green" />
+        <KpiCard label="Duplicates" value={formatPercent(conversionAnalytics.duplicateRate)} sub="Repeated identity rows" help="Rows marked duplicate_flag or repeated by email, Google Client ID, counterparty, or title." explanation={planfixMetricDescription("duplicates", language)} evidence={evidenceFor("duplicates")} tone="red" />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
@@ -1017,6 +1056,8 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
           value={conversionAnalytics.crmSignedSalesValue ? formatCurrency(conversionAnalytics.crmSignedSalesValue) : "n/a"}
           sub={conversionAnalytics.crmSignedSalesValue ? `${formatPercent(conversionAnalytics.crmSignedSalesCoverage)} signed rows covered` : "deal_value_actual is empty"}
           help="Potential CRM Sales: sum of deal_value_actual for rows that reached agreement signed. Current export does not fill this field, so finance Sales remains the reliable signed-contract value."
+          explanation={planfixMetricDescription("signedValue", language)}
+          evidence={evidenceFor("signedValue")}
           tone={conversionAnalytics.crmSignedSalesValue ? "green" : "amber"}
         />
       </div>
@@ -1040,13 +1081,13 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
                   }
                 />
                 <Legend />
-                <Bar isAnimationActive={false} yAxisId="right" dataKey="leads" fill="#cbd5e1" name="Leads" radius={[3, 3, 0, 0]} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="relevantStrictRate" stroke="#0891b2" strokeWidth={2} name="Relevant strict rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name="Qualified / Active rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="agreementSentRate" stroke="#7c3aed" strokeWidth={2} name="Agreement sent rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="agreementSignedRate" stroke="#be123c" strokeWidth={2} name="Agreement signed rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name="Client rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="fullPaidClientRate" stroke="#16a34a" strokeWidth={2} name="Full-paid rate" dot={false} />
+                <Bar isAnimationActive={false} yAxisId="right" dataKey="leads" fill="#cbd5e1" name={t("Leads")} radius={[3, 3, 0, 0]} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="relevantStrictRate" stroke="#0891b2" strokeWidth={2} name={t("Relevant strict rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name={t("Qualified / Active rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="agreementSentRate" stroke="#7c3aed" strokeWidth={2} name={t("Agreement sent rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="agreementSignedRate" stroke="#be123c" strokeWidth={2} name={t("Agreement signed rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name={t("Client rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="fullPaidClientRate" stroke="#16a34a" strokeWidth={2} name={t("Full-paid rate")} dot={false} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -1085,13 +1126,13 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
                   }
                 />
                 <Legend />
-                <Bar isAnimationActive={false} yAxisId="right" dataKey="leads" fill="#cbd5e1" name="Leads" radius={[3, 3, 0, 0]} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="relevantStrictRate" stroke="#0891b2" strokeWidth={2} name="Relevant strict rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name="Qualified / Active rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="agreementSentRate" stroke="#7c3aed" strokeWidth={2} name="Agreement sent rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="agreementSignedRate" stroke="#be123c" strokeWidth={2} name="Agreement signed rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name="Client rate" dot={false} />
-                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="fullPaidClientRate" stroke="#16a34a" strokeWidth={2} name="Full-paid rate" dot={false} />
+                <Bar isAnimationActive={false} yAxisId="right" dataKey="leads" fill="#cbd5e1" name={t("Leads")} radius={[3, 3, 0, 0]} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="relevantStrictRate" stroke="#0891b2" strokeWidth={2} name={t("Relevant strict rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name={t("Qualified / Active rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="agreementSentRate" stroke="#7c3aed" strokeWidth={2} name={t("Agreement sent rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="agreementSignedRate" stroke="#be123c" strokeWidth={2} name={t("Agreement signed rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name={t("Client rate")} dot={false} />
+                <Line isAnimationActive={false} yAxisId="left" type="monotone" dataKey="fullPaidClientRate" stroke="#16a34a" strokeWidth={2} name={t("Full-paid rate")} dot={false} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -1146,7 +1187,7 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
                 }}
               />
               <Legend />
-              <Bar isAnimationActive={false} dataKey="relevantStrictRate" fill="#0891b2" name="Relevant strict rate" radius={[0, 4, 4, 0]} />
+              <Bar isAnimationActive={false} dataKey="relevantStrictRate" fill="#0891b2" name={t("Relevant strict rate")} radius={[0, 4, 4, 0]} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -1184,12 +1225,12 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
                 <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
                 <YAxis yAxisId="right" orientation="right" tickFormatter={(value) => `${Math.round(Number(value) * 100)}%`} tick={{ fontSize: 12 }} />
                 <Tooltip formatter={(value, name) => (String(name).includes("rate") ? formatPercent(numericValue(value)) : formatNumber(numericValue(value)))} />
-                <Bar isAnimationActive={false} yAxisId="left" dataKey="leads" fill="#2563eb" name="Leads" radius={[3, 3, 0, 0]} />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="relevantStrictRate" stroke="#0891b2" strokeWidth={2} name="Relevant strict rate" />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name="Qualified / Active rate" />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="agreementSentRate" stroke="#7c3aed" strokeWidth={2} name="Agreement sent rate" />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="agreementSignedRate" stroke="#be123c" strokeWidth={2} name="Agreement signed rate" />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name="Client rate" />
+                <Bar isAnimationActive={false} yAxisId="left" dataKey="leads" fill="#2563eb" name={t("Leads")} radius={[3, 3, 0, 0]} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="relevantStrictRate" stroke="#0891b2" strokeWidth={2} name={t("Relevant strict rate")} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name={t("Qualified / Active rate")} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="agreementSentRate" stroke="#7c3aed" strokeWidth={2} name={t("Agreement sent rate")} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="agreementSignedRate" stroke="#be123c" strokeWidth={2} name={t("Agreement signed rate")} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name={t("Client rate")} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -1204,19 +1245,19 @@ function Conversion({ analytics, records, finance }: { analytics: Analytics; rec
                 <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
                 <YAxis yAxisId="right" orientation="right" tickFormatter={(value) => `${Math.round(Number(value) * 100)}%`} tick={{ fontSize: 12 }} />
                 <Tooltip formatter={(value, name) => (String(name).includes("rate") ? formatPercent(numericValue(value)) : formatNumber(numericValue(value)))} />
-                <Bar isAnimationActive={false} yAxisId="left" dataKey="leads" fill="#16a34a" name="Leads" radius={[3, 3, 0, 0]} />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="relevantStrictRate" stroke="#0891b2" strokeWidth={2} name="Relevant strict rate" />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name="Qualified / Active rate" />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="agreementSentRate" stroke="#7c3aed" strokeWidth={2} name="Agreement sent rate" />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="agreementSignedRate" stroke="#be123c" strokeWidth={2} name="Agreement signed rate" />
-                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name="Client rate" />
+                <Bar isAnimationActive={false} yAxisId="left" dataKey="leads" fill="#16a34a" name={t("Leads")} radius={[3, 3, 0, 0]} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="relevantStrictRate" stroke="#0891b2" strokeWidth={2} name={t("Relevant strict rate")} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name={t("Qualified / Active rate")} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="agreementSentRate" stroke="#7c3aed" strokeWidth={2} name={t("Agreement sent rate")} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="agreementSignedRate" stroke="#be123c" strokeWidth={2} name={t("Agreement signed rate")} />
+                <Line isAnimationActive={false} yAxisId="right" type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name={t("Client rate")} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
         </Panel>
       </div>
     </div>
-  );
+  ), t);
 }
 
 function heat(value: number) {
@@ -1225,6 +1266,7 @@ function heat(value: number) {
 }
 
 function Cohorts({ analytics }: { analytics: Analytics }) {
+  const { t } = useReportLanguage();
   const serviceCohortGroups = useMemo(() => {
     const groups = new Map<string, Analytics["serviceCohorts"]>();
     for (const row of analytics.serviceCohorts) {
@@ -1239,7 +1281,7 @@ function Cohorts({ analytics }: { analytics: Analytics }) {
       .sort((a, b) => b.totalLeads - a.totalLeads);
   }, [analytics.serviceCohorts]);
 
-  return (
+  return translateReportNode((
     <div className="space-y-5">
       <Note>
         M0-M5 use only real <strong>first_payment_at</strong> dates. Paid leads without a payment date are excluded from M0-M5 and shown separately as <strong>Paid date unknown</strong>.
@@ -1360,16 +1402,16 @@ function Cohorts({ analytics }: { analytics: Analytics }) {
               <YAxis tickFormatter={(value) => `${Math.round(Number(value) * 100)}%`} tick={{ fontSize: 12 }} />
               <Tooltip formatter={(value) => formatPercent(numericValue(value))} />
               <Legend />
-              <Line isAnimationActive={false} type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name="Qualified / Active" />
-              <Line isAnimationActive={false} type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name="Current paid rate" />
-              <Line isAnimationActive={false} type="monotone" dataKey="m5" stroke="#16a34a" strokeWidth={2} name="M5 paid with date" />
-              <Line isAnimationActive={false} type="monotone" dataKey="rejectionRate" stroke="#dc2626" strokeWidth={2} name="Rejected" />
+              <Line isAnimationActive={false} type="monotone" dataKey="qualifiedActiveRate" stroke="#2563eb" strokeWidth={2} name={t("Qualified / Active")} />
+              <Line isAnimationActive={false} type="monotone" dataKey="clientRate" stroke="#f59e0b" strokeWidth={2} name={t("Current paid rate")} />
+              <Line isAnimationActive={false} type="monotone" dataKey="m5" stroke="#16a34a" strokeWidth={2} name={t("M5 paid with date")} />
+              <Line isAnimationActive={false} type="monotone" dataKey="rejectionRate" stroke="#dc2626" strokeWidth={2} name={t("Rejected")} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
       </Panel>
     </div>
-  );
+  ), t);
 }
 
 type FinancialMetricRow = {
@@ -1471,6 +1513,7 @@ function FinancialReport({
   cleanupResult: LeadCleanupResult;
   financeData: FinanceData | null;
 }) {
+  const { t } = useReportLanguage();
   const financialAnalytics = useMemo(
     () => (financeData ? buildAnalytics(records, financeData) : analytics),
     [analytics, financeData, records],
@@ -1601,7 +1644,7 @@ function FinancialReport({
     { label: "Revenue / sales relation", type: "percent", actual: salesToRevenue },
   ];
 
-  return (
+  return translateReportNode((
     <div className="space-y-5">
       <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -1680,9 +1723,9 @@ function FinancialReport({
               <YAxis tick={{ fontSize: 12 }} />
               <Tooltip formatter={(value) => formatNumber(numericValue(value))} />
               <Legend />
-              <Bar isAnimationActive={false} dataKey="crmCreatedLeads" fill="#94a3b8" name="CRM created leads" radius={[3, 3, 0, 0]} />
-              <Bar isAnimationActive={false} dataKey="cleanLeads" fill="#2563eb" name="Clean leads" radius={[3, 3, 0, 0]} />
-              <Line isAnimationActive={false} type="monotone" dataKey="financeLeads" stroke="#16a34a" strokeWidth={2} name="Finance leads" dot={false} />
+              <Bar isAnimationActive={false} dataKey="crmCreatedLeads" fill="#94a3b8" name={t("CRM created leads")} radius={[3, 3, 0, 0]} />
+              <Bar isAnimationActive={false} dataKey="cleanLeads" fill="#2563eb" name={t("Clean leads")} radius={[3, 3, 0, 0]} />
+              <Line isAnimationActive={false} type="monotone" dataKey="financeLeads" stroke="#16a34a" strokeWidth={2} name={t("Finance leads")} dot={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -1697,10 +1740,10 @@ function FinancialReport({
               <YAxis tickFormatter={(value) => `€${Math.round(Number(value) / 1000)}k`} tick={{ fontSize: 12 }} />
               <Tooltip formatter={(value) => formatCurrency(numericValue(value))} />
               <Legend />
-              <Line isAnimationActive={false} type="monotone" dataKey="sales" stroke="#7c3aed" strokeWidth={2} name="Sales value" dot={false} />
-              <Line isAnimationActive={false} type="monotone" dataKey="revenue" stroke="#0891b2" strokeWidth={2} name="Revenue" dot={false} />
-              <Line isAnimationActive={false} type="monotone" dataKey="marketingSpend" stroke="#f59e0b" strokeWidth={2} name="Marketing cost" dot={false} />
-              <Line isAnimationActive={false} type="monotone" dataKey="profitAfterMarketing" stroke="#dc2626" strokeWidth={2} name="Profit after marketing" dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="sales" stroke="#7c3aed" strokeWidth={2} name={t("Sales value")} dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="revenue" stroke="#0891b2" strokeWidth={2} name={t("Revenue")} dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="marketingSpend" stroke="#f59e0b" strokeWidth={2} name={t("Marketing cost")} dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="profitAfterMarketing" stroke="#dc2626" strokeWidth={2} name={t("Profit after marketing")} dot={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -1715,10 +1758,10 @@ function FinancialReport({
               <YAxis tick={{ fontSize: 12 }} />
               <Tooltip formatter={(value) => formatNumber(numericValue(value))} />
               <Legend />
-              <Bar isAnimationActive={false} dataKey="signedContracts" fill="#16a34a" name="Signed contracts" radius={[3, 3, 0, 0]} />
-              <Line isAnimationActive={false} type="monotone" dataKey="ltContracts" stroke="#2563eb" strokeWidth={2} name="Lithuania contracts" dot={false} />
-              <Line isAnimationActive={false} type="monotone" dataKey="lvContracts" stroke="#7c3aed" strokeWidth={2} name="Latvia contracts" dot={false} />
-              <Line isAnimationActive={false} type="monotone" dataKey="rbiContracts" stroke="#f59e0b" strokeWidth={2} name="RBI / residence contracts" dot={false} />
+              <Bar isAnimationActive={false} dataKey="signedContracts" fill="#16a34a" name={t("Signed contracts")} radius={[3, 3, 0, 0]} />
+              <Line isAnimationActive={false} type="monotone" dataKey="ltContracts" stroke="#2563eb" strokeWidth={2} name={t("Lithuania contracts")} dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="lvContracts" stroke="#7c3aed" strokeWidth={2} name={t("Latvia contracts")} dot={false} />
+              <Line isAnimationActive={false} type="monotone" dataKey="rbiContracts" stroke="#f59e0b" strokeWidth={2} name={t("RBI / residence contracts")} dot={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -1855,17 +1898,18 @@ function FinancialReport({
         </div>
       </Panel>
     </div>
-  );
+  ), t);
 }
 
 function Quality({ analytics }: { analytics: Analytics }) {
+  const { t } = useReportLanguage();
   const fieldGroups: Array<Analytics["fieldCoverage"][number]["group"]> = [
     "Used directly in analytics",
     "Still using status proxy",
     "Critical analytics fields",
   ];
 
-  return (
+  return translateReportNode((
     <div className="space-y-5">
       <div className="grid gap-4 md:grid-cols-3">
         <KpiCard label="Field implementation" value={formatPercent(analytics.fieldImplementationRate)} sub="Fields with any usable values" help="Share of tracked analytics fields that have at least one filled value in the current dataset." />
@@ -1904,19 +1948,21 @@ function Quality({ analytics }: { analytics: Analytics }) {
         </div>
       </Panel>
     </div>
-  );
+  ), t);
 }
 
 function ReportPage({ title, children }: { title: string; children: ReactNode }) {
-  return (
+  const { t } = useReportLanguage();
+  return translateReportNode((
     <section className="export-page">
       <div className="export-page-title">{title}</div>
       <div className="export-page-content">{children}</div>
     </section>
-  );
+  ), t);
 }
 
 export default function Home() {
+  const { t } = useReportLanguage();
   const dataModelVersion = CRM_DATA_MODEL_VERSION;
   const [records, setRecords] = useState<CRMRecord[]>([]);
   const [financeData, setFinanceData] = useState<FinanceData | null>(null);
@@ -2150,11 +2196,9 @@ export default function Home() {
         const title = page.querySelector<HTMLElement>(".export-page-title")?.innerText.trim();
         let cursorY = margin;
         if (title) {
-          pdf.setFont("helvetica", "bold");
-          pdf.setFontSize(14);
-          pdf.setTextColor(15, 23, 42);
-          pdf.text(title, margin, cursorY + 5);
-          cursorY += 12;
+          const heading = renderPdfHeading(title, contentWidth, 14, 6);
+          pdf.addImage(heading.dataUrl, "PNG", margin, cursorY, contentWidth, heading.height);
+          cursorY += heading.height + 6;
         }
 
         const content = page.querySelector<HTMLElement>(".export-page-content");
@@ -2247,8 +2291,9 @@ export default function Home() {
 
   if (!records.length && isLoading) return <EmptyState />;
 
-  return (
+  return translateReportNode((
     <main className={clsx("min-h-screen bg-[#f7f8fa]", isExporting && "pdf-export")}>
+      <div className="mx-auto max-w-7xl px-4 pt-4 sm:px-6 lg:px-8"><div className="flex flex-wrap items-center justify-between gap-3"><ReportSwitcher active="planfix" /><LanguageSelector /></div></div>
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div>
@@ -2272,30 +2317,7 @@ export default function Home() {
 
           <div className="flex flex-col gap-3 lg:items-end">
             <div className="flex flex-wrap items-end gap-2">
-              <label className="grid gap-1 text-xs font-semibold text-slate-600">
-                From
-                <input
-                  type="date"
-                  value={dateRange.from}
-                  min={getDateBounds(records).from}
-                  max={dateRange.to || getDateBounds(records).to}
-                  onChange={(event) => setDateRange((current) => ({ ...current, from: event.target.value }))}
-                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-800 shadow-sm"
-                  title="Global date filter uses Дата створення / lead creation date"
-                />
-              </label>
-              <label className="grid gap-1 text-xs font-semibold text-slate-600">
-                To
-                <input
-                  type="date"
-                  value={dateRange.to}
-                  min={dateRange.from || getDateBounds(records).from}
-                  max={getDateBounds(records).to}
-                  onChange={(event) => setDateRange((current) => ({ ...current, to: event.target.value }))}
-                  className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-800 shadow-sm"
-                  title="Global date filter uses Дата створення / lead creation date"
-                />
-              </label>
+              <DateRangePicker value={dateRange} onChange={setDateRange} bounds={fullDateBounds} disabled={isExporting} />
               <button
                 type="button"
                 onClick={() => setDateRange(getDateBounds(records))}
@@ -2453,7 +2475,7 @@ export default function Home() {
             {isExporting ? "Exporting..." : "Export this page to PDF"}
           </button>
         </div>
-        {tab === "overview" ? <Overview analytics={analytics} scope={reportScope} onResetFilters={resetAllFilters} /> : null}
+        {tab === "overview" ? <Overview analytics={analytics} records={filteredRecords} scope={reportScope} onResetFilters={resetAllFilters} /> : null}
         {tab === "sources" ? <Sources analytics={analytics} scope={reportScope} onResetFilters={resetAllFilters} /> : null}
         {tab === "conversion" ? <Conversion analytics={analytics} records={filteredRecords} finance={filteredFinance} /> : null}
         {tab === "cohorts" ? <Cohorts analytics={analytics} /> : null}
@@ -2465,7 +2487,7 @@ export default function Home() {
         <div ref={exportRef} className="export-report">
           {exportMode === "all" || tab === "overview" ? (
             <ReportPage title="Overview">
-              <Overview analytics={analytics} scope={reportScope} />
+              <Overview analytics={analytics} records={filteredRecords} scope={reportScope} />
             </ReportPage>
           ) : null}
           {exportMode === "all" || tab === "sources" ? (
@@ -2496,5 +2518,5 @@ export default function Home() {
         </div>
       ) : null}
     </main>
-  );
+  ), t);
 }

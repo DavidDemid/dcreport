@@ -1,5 +1,6 @@
 node_modules/
 .next/
+.next-*/
 out/
 dist/
 build/
@@ -7,5 +8,8 @@ build/
 .env
 .env.local
 .env.production
+.env*.local
 
 .DS_Store
+test-results/
+playwright-report/

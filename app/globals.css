@@ -135,3 +135,47 @@ select {
 .export-report .export-page + .export-page {
   margin-top: 24px;
 }
+
+.kommo-dashboard {
+  letter-spacing: 0;
+}
+
+.kommo-table th,
+.kommo-table td {
+  overflow-wrap: anywhere;
+}
+
+.kommo-filter summary::-webkit-details-marker {
+  display: none;
+}
+
+.kommo-pdf-root .pdf-ignore {
+  display: none !important;
+}
+
+.kommo-pdf-root .lg\:grid-cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+}
+
+.kommo-pdf-root table {
+  min-width: 0 !important;
+  width: 100%;
+}
+
+.kommo-pdf-root td,
+.kommo-pdf-root th {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .kommo-dashboard table {
+    min-width: 0;
+    font-size: 10px;
+  }
+  .kommo-dashboard td,
+  .kommo-dashboard th {
+    padding-left: 3px;
+    padding-right: 3px;
+  }
+}

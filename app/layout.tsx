@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { ReportLanguageProvider } from "@/components/report-language";
 
 export const metadata: Metadata = {
   title: "DC CRM Analytics",
@@ -13,7 +14,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body><ReportLanguageProvider>{children}</ReportLanguageProvider></body>
     </html>
   );
 }

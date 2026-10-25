@@ -1,4 +1,6 @@
 import { FileSpreadsheet, LockKeyhole } from "lucide-react";
+import { LocalizedContent } from "@/components/localized-content";
+import { LanguageSelector } from "@/components/report-language";
 
 export default async function LoginPage({
   searchParams,
@@ -10,8 +12,10 @@ export default async function LoginPage({
   const hasError = params.error === "1";
 
   return (
+    <LocalizedContent>
     <main className="flex min-h-screen items-center justify-center bg-[#f7f8fa] px-4 py-10">
       <section className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="mb-5 flex justify-end"><LanguageSelector /></div>
         <div className="flex items-center gap-3 text-sm font-semibold text-blue-700">
           <FileSpreadsheet className="h-5 w-5" />
           DC CRM Analytics
@@ -63,5 +67,6 @@ export default async function LoginPage({
         </form>
       </section>
     </main>
+    </LocalizedContent>
   );
 }

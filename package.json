@@ -7,7 +7,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test:analytics": "node --test tests/kommo.test.cjs tests/kommo-finance.test.cjs tests/date-range.test.cjs tests/i18n.test.cjs tests/metric-evidence.test.cjs tests/kommo-evidence.test.cjs tests/planfix-evidence.test.cjs",
+    "test:browser": "playwright test"
   },
   "keywords": [],
   "author": "",
@@ -24,6 +26,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "^25.8.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
