@@ -12,7 +12,7 @@ require.extensions[".ts"] = (module, path) => {
 };
 const k = require("../lib/kommo.ts");
 const a = require("../lib/kommo-analytics.ts");
-const { matchedFinancePerformance: performance } = require("../lib/kommo-finance.ts");
+const { matchedFinancePerformance: performance, kommoFinanceCostSource } = require("../lib/kommo-finance.ts");
 const { parseFinanceWorkbook } = require("../lib/finance.ts");
 const XLSX = require("xlsx");
 const asOf = new Date("2026-10-21T15:00:00Z");
@@ -118,7 +118,7 @@ test("service, owner, origin, and source filters never shrink the all-clean allo
     { "Qualified service": "LT citizenship", "Lead resp. user": "B" },
     { "Qualified service": "LV citizenship", "Lead resp. user": "A", "Old Lead ID": "old-3" },
     { "Qualified service": "LV citizenship", "Lead resp. user": "B" },
-    { "Qualified service": "LT citizenship", "Lead resp. user": "A", "Marketing Source": "Facebook" },
+    { "Qualified service": "LT citizenship", "Lead resp. user": "A", "Marketing Source": "Facebook ads" },
   ]);
   const costs = finance([["2026-09", "Google Ads", 1000], ["2026-09", "Facebook / Instagram", 300]]);
   const cases = [
@@ -134,7 +134,7 @@ test("service, owner, origin, and source filters never shrink the all-clean allo
     assert.match(row.allocation, /Estimated/);
     assert.deepEqual(performance(a.filterLeads(leads, selected), leads, costs, selected, "source", asOf), [row]);
   }
-  const [source] = performance(leads, leads, costs, { ...september, sources: ["Facebook / Instagram"] }, "source", asOf);
+  const [source] = performance(leads, leads, costs, { ...september, sources: ["Facebook / Instagram Ads"] }, "source", asOf);
   assert.equal(source.spend, 300);
   assert.equal(source.estimated, false);
 });
@@ -146,7 +146,7 @@ test("monthly source spend is conserved across service, manager, campaign and so
     { "Qualified service": "LT citizenship", "Lead resp. user": "A", "utm_campaign*": "One" },
     { "Qualified service": "LV citizenship", "Lead resp. user": "B", "utm_campaign*": "Two" },
     { "Qualified service": "LV citizenship", "Lead resp. user": "B", "utm_campaign*": "Two" },
-    { "Marketing Source": "Facebook", "Qualified service": "LT citizenship", "Lead resp. user": "A", "Payment status": "Fully paid" },
+    { "Marketing Source": "Facebook ads", "Qualified service": "LT citizenship", "Lead resp. user": "A", "Payment status": "Fully paid" },
   ]);
   const costs = finance([
     ["2026-08", "Google Ads", 100], ["2026-09", "Google Ads", 900], ["2026-09", "Facebook / Instagram", 200],
@@ -167,7 +167,7 @@ test("monthly source spend is conserved across service, manager, campaign and so
 test("normalized sources match exactly and overhead is excluded even when assigned to a real source", () => {
   const leads = dataset([
     { "utm_source*": "google", "Marketing Source": "Calendly" },
-    { "FB lead id": "123" }, { "Marketing Source": "unmapped-token" },
+    { "FB lead id": "123", "Fb is organic": "false" }, { "Marketing Source": "unmapped-token" },
   ]);
   const costs = finance([
     ["2026-09", "Google Ads", 100], ["2026-09", "Google Ads", 20, "Clickcease"],
@@ -177,7 +177,7 @@ test("normalized sources match exactly and overhead is excluded even when assign
   ]);
   const rows = performance(leads, leads, costs, september, "source", asOf);
   assert.equal(rows.find((row) => row.name === "Google Ads").spend, 120);
-  assert.equal(rows.find((row) => row.name === "Facebook / Instagram").spend, 50);
+  assert.equal(rows.find((row) => row.name === "Facebook / Instagram Ads").spend, 50);
   assert.equal(rows.find((row) => row.name === "Other").spend, null);
 });
 
@@ -264,4 +264,62 @@ test("finance workbook retains explicit zero costs without inventing costs for b
   assert.equal(row.cpl, 0);
   assert.equal(row.cpql, 0);
   assert.equal(row.cac, null);
+});
+
+test("legacy paid Meta costs fund only Ads, never chat, unproven Meta or organic leads", () => {
+  const leads = dataset([
+    { "Marketing Source": "Facebook ads", "Payment status": "Paid" },
+    { "Marketing Source": "Facebook Messenger" }, { "Marketing Source": "Instagram DM" },
+    { "Marketing Source": "", "utm_source*": "fb" },
+    { "Marketing Source": "Facebook" },
+    { "Marketing Source": "", "FB lead id": "organic-id", "Fb is organic": "true" },
+  ]);
+  const costs = finance([
+    ["2026-09", "Facebook / Instagram", 120, "Paid traffic facebook"],
+    ["2026-09", "Facebook / Instagram", 80, "Paid traffic instagram"],
+    ["2026-09", "Facebook / Instagram", 900, "SMM"],
+    ["2026-09", "Facebook / Instagram", 800, "FB & Instagram"],
+    ["2026-09", k.KOMMO_META_CHAT_SOURCE, 999, "Paid traffic facebook"],
+    ["2026-09", k.KOMMO_META_UNKNOWN_SOURCE, 999, "Paid traffic facebook"],
+  ]);
+  const rows = performance(leads, leads, costs, september, "source", asOf);
+  const ads = rows.find((row) => row.name === k.KOMMO_META_ADS_SOURCE);
+  assert.deepEqual([ads.leads, ads.matchedLeads, ads.matchedClients, ads.spend, ads.cpl, ads.cac], [1, 1, 1, 200, 200, 200]);
+  for (const source of [k.KOMMO_META_CHAT_SOURCE, k.KOMMO_META_UNKNOWN_SOURCE, "Organic Social"]) {
+    const row = rows.find((entry) => entry.name === source);
+    assert.deepEqual([row.spend, row.cpl, row.cac, row.matchedLeads], [null, null, null, 0]);
+  }
+  const [chat] = performance(leads, leads, costs, { ...september, sources: [k.KOMMO_META_CHAT_SOURCE] }, "source", asOf);
+  assert.equal(chat.leads, 2);
+  assert.equal(chat.spend, null);
+  const [service] = performance(leads, leads, costs, september, "service", asOf);
+  assert.deepEqual([service.leads, service.matchedLeads, service.spend, service.cpl], [6, 1, 200, 200]);
+});
+
+test("Meta zero spend remains zero only for paid leads; chat costs stay unavailable", () => {
+  const leads = dataset([{ "Marketing Source": "Facebook ads" }, { "Marketing Source": "Facebook Messenger" }, { "Marketing Source": "Facebook" }]);
+  const rows = performance(leads, leads, finance([["2026-09", "Facebook / Instagram", 0, "Paid traffic facebook"]]), september, "source", asOf);
+  assert.equal(rows.find((row) => row.name === k.KOMMO_META_ADS_SOURCE).cpl, 0);
+  assert.equal(rows.find((row) => row.name === k.KOMMO_META_CHAT_SOURCE).cpl, null);
+  assert.equal(rows.find((row) => row.name === k.KOMMO_META_CHAT_SOURCE).spend, null);
+  assert.equal(rows.find((row) => row.name === k.KOMMO_META_UNKNOWN_SOURCE).spend, null);
+});
+
+test("Kommo finance alias excludes social management and does not mutate shared finance normalization", () => {
+  for (const category of ["SMM", "FB & Instagram", "Meta agency fees", "Facebook management", "Organic social", "unpaid social", "not paid social"]) {
+    assert.equal(kommoFinanceCostSource({ source: "Facebook / Instagram", category }), null, category);
+  }
+  for (const category of ["Paid traffic facebook", "Paid traffic instagram", "Facebook Ads", "Facebook / Instagram"]) {
+    assert.equal(kommoFinanceCostSource({ source: "Facebook / Instagram", category }), k.KOMMO_META_ADS_SOURCE, category);
+  }
+  assert.equal(kommoFinanceCostSource({ source: "Google Ads", category: "Clickcease" }), "Google Ads");
+  assert.equal(kommoFinanceCostSource({ source: k.KOMMO_META_ADS_SOURCE, category: "SMM" }), null);
+  const leads = dataset([{ "Marketing Source": "Facebook ads" }]);
+  const costs = finance([["2026-09", "Facebook / Instagram", 50, "Paid traffic facebook"]]);
+  const before = JSON.stringify(costs);
+  assert.equal(performance(leads, leads, costs, september, "source", asOf)[0].spend, 50);
+  assert.equal(JSON.stringify(costs), before);
+  assert.equal(costs.channelCosts[0].source, "Facebook / Instagram");
+  const legacyUnknown = leads.map((lead) => ({ ...lead, source: "Facebook / Instagram" }));
+  assert.equal(performance(legacyUnknown, legacyUnknown, costs, september, "source", asOf)[0].spend, null);
 });

@@ -3,6 +3,7 @@
 import { useMemo, type ReactNode } from "react";
 import { Info } from "lucide-react";
 import type { KommoLead } from "../lib/kommo";
+import { KOMMO_COLUMN_ALIASES } from "../lib/kommo";
 import { hasContact, isAgreement, isClient, isFullPaid, isQualified } from "../lib/kommo-analytics";
 import { translateReportNode, useReportLanguage } from "./report-language";
 
@@ -20,8 +21,8 @@ type DateField = {
 };
 
 const DATE_FIELDS: DateField[] = [
-  { header: "Date Created", key: "importedAt", evidence: "Kommo creation/import timestamp; not necessarily original acquisition." },
-  { header: "Last Modified", key: "modifiedAt", evidence: "Snapshot modification timestamp; not a stage-change history." },
+  { header: "Date Created", fallbackHeader: "Created on", key: "importedAt", evidence: "Kommo creation/import timestamp; not necessarily original acquisition." },
+  { header: "Last Modified", fallbackHeader: "Modified on", key: "modifiedAt", evidence: "Snapshot modification timestamp; not a stage-change history." },
   { header: "First contact at", key: "firstContactAt", proxy: hasContact, evidence: "Proxy: contact/qualified stage or downstream evidence; no contact time." },
   { header: "TD_In work", key: "inWorkAt", proxy: isQualified, evidence: "Proxy: qualified stage or downstream agreement/payment evidence; no entry time." },
   { header: "Agreement sent at", key: "agreementSentAt", proxy: isAgreement, evidence: "Proxy: agreement/client classification; does not prove sending or signature." },
@@ -47,13 +48,13 @@ const CRITICAL_HEADERS = [...new Set([
   "Real Reason for Rejection", "Reason for Rejection", "Old Lead ID", "Date Created(from Planfix)",
   "Work email (contact)", "Personal email (contact)", "Other email (contact)",
   "Mobile phone (contact)", "Work phone (contact)", "Other phone (contact)",
-  ...DATE_FIELDS.flatMap((field) => field.fallbackHeader ? [field.header, field.fallbackHeader] : [field.header]),
+  ...DATE_FIELDS.map((field) => field.header),
 ])];
 
 const SOURCE_HEADERS = [
   "first_touch_source", "utm_source*", "utm_source", "utm_tag", "gclid*", "gclid",
   "Marketing Source", "first_touch_medium", "utm_medium*", "utm_medium",
-  "first_touch_campaign", "utm_campaign*", "utm_campaign", "FB lead id", "Type",
+  "first_touch_campaign", "utm_campaign*", "utm_campaign", "FB lead id", "FB form id", "Fb ad id", "Fb is organic", "Type",
 ];
 
 const SOURCE_METHODS = [
@@ -63,6 +64,7 @@ const SOURCE_METHODS = [
   { key: "click_id", label: "click_id", evidence: "Google source inferred from gclid; proxy, not a direct source field." },
   { key: "meta_lead_id", label: "Meta lead ID", evidence: "Meta lead-form evidence; organic flag is respected when available." },
   { key: "Marketing Source", label: "Marketing Source", evidence: "Legacy fallback; may describe capture rather than acquisition." },
+  { key: "Type", label: "Type", evidence: "Explicit Facebook / Instagram chat fallback; not proof of paid acquisition." },
   { key: "unknown", label: "unknown", evidence: "No source candidate accepted by the normalizer." },
   { key: "other", label: "Other / unrecognized method", evidence: "Method outside the normalizer's documented groups." },
 ];
@@ -71,6 +73,9 @@ const CAPTURE_METHODS = [
   { key: "Calendly", label: "Calendly", evidence: "Inferred from legacy Marketing Source." },
   { key: "Website form", label: "Website form", evidence: "Inferred from legacy Marketing Source." },
   { key: "Meta lead form", label: "Meta lead form", evidence: "Inferred from FB lead id after legacy capture checks." },
+  { key: "Messenger", label: "Messenger", evidence: "Explicit Facebook / Messenger chat evidence; acquisition source is evaluated separately." },
+  { key: "Instagram chat", label: "Instagram chat", evidence: "Explicit Instagram chat evidence; acquisition source is evaluated separately." },
+  { key: "Facebook / Instagram chat", label: "Facebook / Instagram chat", evidence: "Explicit Facebook / Instagram chat fallback; not proof of paid acquisition." },
   { key: "other", label: "Other recorded capture method", evidence: "Other captureMethod values, including Type; raw labels withheld." },
   { key: "Not recorded", label: "Not recorded", evidence: "No capture method recorded." },
 ];
@@ -283,7 +288,12 @@ export function KommoQuality({ leads, allLeads, headers, asOf }: {
 
   const sourceMethodRows: CountRow[] = SOURCE_METHODS.map((row) => ({ ...row, selected: selected.sourceMethods.get(row.key) ?? 0, all: all.sourceMethods.get(row.key) ?? 0 }));
   const captureRows: CountRow[] = CAPTURE_METHODS.map((row) => ({ ...row, selected: selected.captureMethods.get(row.key) ?? 0, all: all.captureMethods.get(row.key) ?? 0 }));
-  const missingCritical = CRITICAL_HEADERS.filter((field) => !available.has(field));
+  const criticalHeaders = CRITICAL_HEADERS.map((header) => {
+    const field = DATE_FIELDS.find((date) => date.header === header);
+    const alias = KOMMO_COLUMN_ALIASES.find(([canonical]) => canonical === header)?.[1] ?? field?.fallbackHeader;
+    return !available.has(header) && alias && available.has(alias) ? alias : header;
+  });
+  const missingCritical = criticalHeaders.filter((field) => !available.has(field));
   const migrated = selected.response.migrated;
   const native = selected.total - migrated;
   const legacy = selected.sourceMethods.get("Marketing Source") ?? 0;
@@ -323,7 +333,7 @@ export function KommoQuality({ leads, allLeads, headers, asOf }: {
         {!selected.total ? <p className="mt-2 text-xs text-amber-700">No leads in the selected scope. Selected percentages are unavailable.</p> : null}
       </section>
 
-      <ReportTable title="Critical field completeness" help="Exact, case-sensitive header membership in headers determines availability; exact membership in each lead.filled determines filled counts. Normalized fallbacks, stage proxies and placeholder values do not establish field validity. Merged records may have the union of filled headers." description="Direct raw-cell coverage only. Missing column = Unavailable, not 0%. Filled timestamps may still be rejected by the parser; milestone dates are not expected on every lead." rows={CRITICAL_HEADERS} columns={fieldColumns} rowKey={(field) => field} />
+      <ReportTable title="Critical field completeness" help="Exact, case-sensitive header membership in headers determines availability; exact membership in each lead.filled determines filled counts. Normalized fallbacks, stage proxies and placeholder values do not establish field validity. Merged records may have the union of filled headers." description="Direct raw-cell coverage only. Missing column = Unavailable, not 0%. Filled timestamps may still be rejected by the parser; milestone dates are not expected on every lead." rows={criticalHeaders} columns={fieldColumns} rowKey={(field) => field} />
 
       <ReportTable<DateField>
         title="Direct dates versus proxies"

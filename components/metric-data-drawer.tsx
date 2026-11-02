@@ -128,9 +128,9 @@ export function MetricDataDrawer({ evidence, onClose }: { evidence: MetricEviden
   </dialog>, document.body);
 }
 
-export function EvidenceButton({ evidence }: { evidence: EvidenceSource }) {
+export function EvidenceButton({ evidence, compact = false }: { evidence: EvidenceSource; compact?: boolean }) {
   const { language } = useReportLanguage();
   const [open, setOpen] = useState<MetricEvidence | null>(null);
   const label = COPY[language].data;
-  return <span className="pdf-ignore mt-3 block"><button type="button" onClick={() => setOpen(typeof evidence === "function" ? evidence() : evidence)} className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-blue-700 hover:border-blue-300 hover:bg-blue-50" aria-haspopup="dialog"><Table2 size={14} />{label}</button>{open && <MetricDataDrawer evidence={open} onClose={() => setOpen(null)} />}</span>;
+  return <span className="pdf-ignore mt-3 block"><button type="button" title={label} onClick={() => setOpen(typeof evidence === "function" ? evidence() : evidence)} className={`inline-flex min-h-8 items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white py-1 text-xs font-semibold text-blue-700 hover:border-blue-300 hover:bg-blue-50 ${compact ? "h-8 w-8" : "px-2.5"}`} aria-haspopup="dialog"><Table2 size={14} /><span className={compact ? "sr-only" : undefined}>{label}</span></button>{open && <MetricDataDrawer evidence={open} onClose={() => setOpen(null)} />}</span>;
 }

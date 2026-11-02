@@ -48,8 +48,8 @@ export function DataTable({ title, help, headers, rows, firstWidth = "24%" }: { 
   return <>{chunks.map((chunk, index) => <Panel key={index} title={`${title}${chunks.length > 1 ? ` (${index + 1}/${chunks.length})` : ""}`} help={help}>
     <div className="max-w-full overflow-x-auto"><table className="kommo-table w-full table-fixed text-xs tabular-nums">
       <colgroup><col style={{ width: firstWidth }} />{headers.slice(1).map((h) => <col key={h} />)}</colgroup>
-      <thead><tr className="border-b border-slate-200 bg-slate-50">{headers.map((h, i) => <th key={h} className={`break-words px-2 py-3 font-semibold leading-5 text-slate-600 ${i ? "text-right" : "text-left"}`}>{t(h)}</th>)}</tr></thead>
-      <tbody>{chunk.map((row, j) => <tr key={j} className="border-b border-slate-100 align-top last:border-0 hover:bg-slate-50">{row.map((cell, i) => <td key={i} className={`break-words px-2 py-3 leading-5 ${i ? "text-right text-slate-700" : "font-medium text-slate-950"}`}>{translateReportNode(cell, t)}</td>)}</tr>)}</tbody>
+      <thead><tr className="border-b border-slate-200 bg-slate-50">{headers.map((h, i) => <th key={h} className={`break-words px-1 py-3 font-semibold leading-4 text-slate-600 sm:px-2 sm:leading-5 ${i ? "text-right" : "text-left"}`}>{t(h)}</th>)}</tr></thead>
+      <tbody>{chunk.map((row, j) => <tr key={j} className="border-b border-slate-100 align-top last:border-0 hover:bg-slate-50">{row.map((cell, i) => <td key={i} className={`break-words px-1 py-3 leading-4 sm:px-2 sm:leading-5 ${i ? "text-right text-slate-700" : "font-medium text-slate-950"}`}>{translateReportNode(cell, t)}</td>)}</tr>)}</tbody>
     </table>{!rows.length && <p className="py-8 text-center text-sm text-slate-500">{t("No records in the current selection.")}</p>}</div>
   </Panel>)}</>;
 }

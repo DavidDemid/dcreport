@@ -23,7 +23,7 @@ export type KommoEvidenceOptions = {
 
 type Bilingual = readonly [english: string, russian: string];
 type Definition = { title: Bilingual; description: Bilingual; formula: Bilingual; fields: readonly string[] };
-const PAYMENT_FIELDS = ["firstPaymentAt", "secondPaymentAt", "thirdPaymentAt", "fullPaymentAt", "paymentStatus", "payments", "reachedStages"];
+const PAYMENT_FIELDS = ["firstPaymentAt", "secondPaymentAt", "thirdPaymentAt", "fullPaymentAt", "paymentStatus", "payments", "paymentAmounts", "reachedStages"];
 const OPEN_FIELDS = ["stage", "closedAt", "lostAt", "completedAt", "isOpen"];
 
 const DEFINITIONS: Record<KommoEvidenceMetric, Definition> = {
@@ -248,7 +248,7 @@ export function buildKommoEvidence(metric: KommoEvidenceMetric, leads: KommoLead
   });
   const evidence: MetricEvidence = {
     title: definition.title[index], description: kommoMetricDescription(metric, options.language),
-    formula: definition.formula[index], fields: [...definition.fields, "email", "phone", "sourceRaw", "sourceMethod", "mergedIds", "issues", "dateValidation"]
+    formula: definition.formula[index], fields: [...definition.fields, "email", "phone", "sourceRaw", "sourceMethod", "sourceEvidence", "captureMethod", "metaSubmissions", "mergedIds", "issues", "dateValidation"]
       .filter((field, position, all) => all.indexOf(field) === position),
     rows: toRows(selected), baseRows: toRows(base), numerator: amount ?? selected.length,
     ...(amount === undefined ? { denominator: base.length } : {}),

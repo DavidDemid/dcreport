@@ -26,7 +26,7 @@ const SALES: { id: SalesPage; label: string; icon: typeof Activity }[] = [
   { id: "pipeline", label: "Pipeline & Response", icon: Activity }, { id: "actions", label: "Next Actions", icon: CheckCircle2 },
 ];
 const initialScope: Scope = { from: "", to: "", services: [], sources: [], owners: [], origin: "all" };
-const initialOptions: ViewOptions = { cohortEvent: "firstPaymentAt", cohortMode: "cumulative", conversionChannel: "", queueSearch: "", queueAction: "", queuePage: 0 };
+const initialOptions: ViewOptions = { cohortEvent: "firstPaymentAt", cohortMode: "cumulative", conversionChannel: "", queueSearch: "", queueAction: "", queuePage: 0, salesCreatedOnly: false };
 const btn = "inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-50";
 
 export default function KommoReport() {
@@ -102,7 +102,7 @@ export default function KommoReport() {
   }), [prepared]);
   const asOf = dataset?.asOf ?? new Date();
   const selectionLabel = [scope.from || t("Start"), scope.to || t("End"), t(clean ? "clean leads" : "CRM rows"), scope.services.map(t).join(", ") || t("All services"), scope.sources.map(t).join(", ") || t("All channels"), scope.owners.join(", ") || t("All managers"), t(scope.origin === "native" ? "Native Kommo only" : scope.origin === "migrated" ? "Migrated from PlanFix" : "All origins"), `${t("Snapshot")} ${isoDay(asOf)}`].join(" / ");
-  const ctx: ViewContext = { leads: selected, base: prepared, raw: rawSelected, rawBase: dataset?.leads, selectionLabel, finance, scope, asOf, sla, staleDays, options: optionsState, onOptionsChange: (patch) => setOptionsState((current) => ({ ...current, ...patch })), onFinanceOpen: () => { setArea("marketing"); setMarketingPage("finance"); } };
+  const ctx: ViewContext = { leads: selected, base: prepared, raw: rawSelected, rawBase: dataset?.leads, headers: dataset?.headers, selectionLabel, finance, scope, asOf, sla, staleDays, options: optionsState, onOptionsChange: (patch) => setOptionsState((current) => ({ ...current, ...patch })), onFinanceOpen: () => { setArea("marketing"); setMarketingPage("finance"); } };
   const activePage = area === "marketing" ? marketingPage : salesPage;
   const activeLabel = (area === "marketing" ? MARKETING : SALES).find((t) => t.id === activePage)!.label;
   const period = scope.from === scope.to ? scope.from || "All dates" : `${scope.from || "Start"} to ${scope.to || "End"}`;
@@ -187,9 +187,17 @@ export default function KommoReport() {
         </div>
         <nav aria-label={t(area === "marketing" ? "marketing pages" : "sales pages")} className="mt-3 flex flex-wrap border-b border-slate-200">{(area === "marketing" ? MARKETING : SALES).map((tab) => { const Icon = tab.icon; return <button key={tab.id} type="button" aria-current={activePage === tab.id ? "page" : undefined} onClick={() => area === "marketing" ? setMarketingPage(tab.id as MarketingPage) : setSalesPage(tab.id as SalesPage)} className={`inline-flex min-h-12 items-center gap-2 border-b-2 px-3 text-xs font-semibold ${activePage === tab.id ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-900"}`}><Icon size={15} />{t(tab.label)}</button>; })}</nav>
         {noClosedHistory && <p className="mt-3 text-xs leading-5 text-amber-800">{t("Open-stage snapshot: closed-won / closed-lost leads are absent. Conversion and CAC describe the exported population; full historical performance requires an export including closed leads.")}</p>}
+        {area === "sales" && (salesPage === "overview" || salesPage === "managers") && <div className="pdf-ignore mt-4 flex flex-wrap items-center gap-2 text-sm text-slate-700">
+          <label className="relative inline-flex min-h-10 min-w-0 flex-1 cursor-pointer items-center gap-3 sm:flex-none">
+            <input type="checkbox" role="switch" aria-label={t("Only leads created in selected dates")} disabled={exporting} checked={optionsState.salesCreatedOnly} onChange={(event) => setOptionsState((current) => ({ ...current, salesCreatedOnly: event.target.checked }))} className="peer absolute left-0 top-1/2 z-10 h-6 w-11 -translate-y-1/2 cursor-pointer opacity-0" />
+            <span aria-hidden="true" className="relative h-6 w-11 shrink-0 rounded-full bg-slate-300 transition-colors after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform peer-checked:bg-blue-600 peer-checked:after:translate-x-5 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-blue-600" />
+            <span>{t("Only leads created in selected dates")}</span>
+          </label>
+          <Hint text="Off: payments and agreements in the selected period for leads of any creation date. On: additionally require the lead's original creation date to be in that same period. Receipt dates remain filtered in both modes. Marketing cohorts are unchanged." />
+        </div>}
         {area === "sales" && <div className="my-4 flex flex-wrap items-center gap-4 text-xs text-slate-600"><label className="flex items-center gap-2">{t("First-contact SLA")}<input aria-label={t("First-contact SLA minutes")} type="number" min={1} max={10080} value={sla} onChange={(e) => setSla(Math.min(10080, Math.max(1, Number(e.target.value) || 1)))} className="w-20 rounded border border-slate-300 bg-white p-2" />{t("min")}</label><label className="flex items-center gap-2">{t("Stale after")}<input aria-label={t("Stale opportunity days")} type="number" min={1} max={365} value={staleDays} onChange={(e) => setStaleDays(Math.min(365, Math.max(1, Number(e.target.value) || 1)))} className="w-16 rounded border border-slate-300 bg-white p-2" />{t("days")}</label><Hint text="These thresholds control the action queue and SLA comparisons. They are management settings, not targets contained in the export. Elapsed time is in calendar hours, not working hours." /></div>}
         <div className="mt-5 space-y-5" data-active-report={`${area}-${activePage}`}>
-          {selected.length || (area === "marketing" && (marketingPage === "finance" || marketingPage === "quality")) ? renderPage(area, activePage) : <div className="border border-slate-200 bg-white px-5 py-12 text-center"><h2 className="text-base font-semibold">{t("No leads match these filters")}</h2><button onClick={reset} type="button" className={`${btn} mt-4`}><RotateCcw size={14} />{t("Reset all filters")}</button></div>}
+          {selected.length || (area === "sales" && (salesPage === "overview" || salesPage === "managers")) || (area === "marketing" && (marketingPage === "finance" || marketingPage === "quality")) ? renderPage(area, activePage) : <div className="border border-slate-200 bg-white px-5 py-12 text-center"><h2 className="text-base font-semibold">{t("No leads match these filters")}</h2><button onClick={reset} type="button" className={`${btn} mt-4`}><RotateCcw size={14} />{t("Reset all filters")}</button></div>}
         </div>
       </>}
     </div>

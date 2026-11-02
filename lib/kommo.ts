@@ -1,6 +1,12 @@
 import * as XLSX from "xlsx";
 
 export type DateIssue = { field: string; reason: "invalid" | "future" | "before_creation"; raw: string };
+export type MetaSubmission = {
+  leadId: string;
+  formId: string;
+  adId: string;
+  isOrganic: boolean | null;
+};
 export type KommoLead = {
   id: string;
   row: number;
@@ -20,6 +26,8 @@ export type KommoLead = {
   source: string;
   sourceRaw: string;
   sourceMethod: string;
+  sourceEvidence?: string[];
+  metaSubmissions?: MetaSubmission[];
   captureMethod: string;
   campaign: string;
   medium: string;
@@ -27,6 +35,7 @@ export type KommoLead = {
   paymentStatus: string;
   sale: number | null;
   payments: number[];
+  paymentAmounts?: (number | null)[];
   touches: number | null;
   migrated: boolean;
   oldId: string;
@@ -63,9 +72,38 @@ type Cell = string | number | boolean | Date | null | undefined;
 const DAY = 86_400_000;
 const value = (cell: Cell) => cell == null ? "" : String(cell).trim();
 const key = (cell: Cell) => value(cell).replace(/^\uFEFF/, "").toLowerCase().replace(/\s+/g, " ");
+const metaIdValue = (id: string) => id.trim().replace(/^l:/i, "").trim();
+
+/** Consolidate provenance only; conflicting or missing organic flags never become paid. */
+export function mergeMetaSubmissions(submissions: readonly MetaSubmission[]): MetaSubmission[] {
+  const byId = new Map<string, MetaSubmission>();
+  for (const submission of submissions) {
+    const leadId = metaIdValue(submission.leadId);
+    if (!leadId) continue;
+    const normalized: MetaSubmission = {
+      leadId, formId: metaIdValue(submission.formId), adId: metaIdValue(submission.adId),
+      isOrganic: typeof submission.isOrganic === "boolean" ? submission.isOrganic : null,
+    };
+    const previous = byId.get(leadId);
+    if (!previous) byId.set(leadId, normalized);
+    else {
+      previous.formId ||= normalized.formId;
+      previous.adId ||= normalized.adId;
+      if (previous.isOrganic !== normalized.isOrganic) previous.isOrganic = null;
+    }
+  }
+  return [...byId.values()];
+}
 export const isoDay = (date: Date) => date.toISOString().slice(0, 10);
 export const monthOf = (date: Date) => date.toISOString().slice(0, 7);
 export const divide = (n: number, d: number): number | null => d ? n / d : null;
+export const KOMMO_COLUMN_ALIASES = [
+  ["Date Created", "Created on"], ["Last Modified", "Modified on"],
+  ["Lead resp. user", "Respons. user"], ["Sale", "Lead sale €"], ["Main contact", "Fullname"],
+  ["Work email (contact)", "Work email"], ["Personal email (contact)", "Personal email"], ["Other email (contact)", "Other email"],
+  ["Mobile phone (contact)", "Mobile phone"], ["Work phone (contact)", "Work phone"], ["Other phone (contact)", "Other phone"],
+  ["Country (contact)", "Country"], ["Language (contact)", "Language"],
+] as const;
 
 // Export timestamps have no UTC offset. Preserve their CRM calendar/time values.
 export function parseKommoDate(cell: Cell): Date | null {
@@ -109,12 +147,31 @@ export function kommoService(raw: string): string {
   return "Other / Unknown";
 }
 
+export const KOMMO_META_ADS_SOURCE = "Facebook / Instagram Ads";
+export const KOMMO_META_CHAT_SOURCE = "Facebook / Instagram chat";
+export const KOMMO_META_UNKNOWN_SOURCE = "Facebook / Instagram (source unknown)";
+
+const isMetaSource = (raw: string) => /facebook|instagram|\bfb\b|\big\b|\bmeta\b|\bmessenger\b|\bm\.me\b/i.test(raw.replace(/[_-]/g, " "));
+const isOrganicMeta = (raw: string) => /\borganic\b|\bunpaid\b|\b(?:not|non)\s+paid\b|\bno\s+ads?\b/i.test(raw.replace(/[_-]/g, " "));
+const isPaidMeta = (raw: string) => !isOrganicMeta(raw) && /\b(?:ads?|advertising|advertisement|cpc|ppc|cpm|paid)\b/i.test(raw.replace(/[_-]/g, " "));
+
+function metaChatCapture(raw: string): string | null {
+  const text = raw.replace(/[_-]/g, " ");
+  if (!isMetaSource(text) || !/\b(?:chat|messenger|direct|dm|inbox)\b|\bm\.me\b/i.test(text)) return null;
+  if (/facebook|\bfb\b/i.test(text) && /instagram|\big\b/i.test(text)) return KOMMO_META_CHAT_SOURCE;
+  return /instagram|\big\b/i.test(text) ? "Instagram chat" : "Messenger";
+}
+
 function sourceName(raw: string, medium = ""): string {
   const s = raw.toLowerCase();
   if (!s || /^(unknown|not set|\(not set\))$/.test(s)) return "Unknown";
   if (/google|gclid/.test(s)) return /organic|seo/.test(`${s} ${medium}`) ? "Organic Search" : "Google Ads";
   if (/bing|msclkid/.test(s)) return /organic/.test(medium) ? "Organic Search" : "Bing Ads";
-  if (/facebook|instagram|\bfb\b|\big\b|meta/.test(s)) return "Facebook / Instagram";
+  if (isMetaSource(raw)) {
+    if (isOrganicMeta(`${raw} ${medium}`)) return "Organic Social";
+    if (isPaidMeta(raw) || isPaidMeta(medium)) return KOMMO_META_ADS_SOURCE;
+    return metaChatCapture(raw) ? KOMMO_META_CHAT_SOURCE : KOMMO_META_UNKNOWN_SOURCE;
+  }
   if (/organic social/.test(s)) return "Organic Social";
   if (/organic|seo/.test(s)) return "Organic Search";
   if (/bridgewest|partner|simona/.test(s)) return "Partner";
@@ -149,6 +206,9 @@ export function normalizeKommoRows(rows: Cell[][], now = crmWallClockNow()): Kom
   if (headerRow < 0) throw new Error("This is not a Kommo leads export. Expected ID, Lead stage and Date Created columns.");
   const headers = rows[headerRow].map(value);
   const columns = new Map(headers.map((h, i) => [key(h), i]));
+  for (const [canonical, alias] of KOMMO_COLUMN_ALIASES) {
+    if (!columns.has(key(canonical)) && columns.has(key(alias))) columns.set(key(canonical), columns.get(key(alias))!);
+  }
   for (const required of ["id", "lead stage", "date created"]) {
     if (!columns.has(required)) throw new Error(`Missing required Kommo column: ${required}`);
   }
@@ -197,18 +257,54 @@ export function normalizeKommoRows(rows: Cell[][], now = crmWallClockNow()): Kom
     const utmTag = get(row, "utm_tag");
     const query = new URLSearchParams(utmTag.includes("?") ? utmTag.slice(utmTag.indexOf("?") + 1) : utmTag);
     const medium = get(row, "first_touch_medium", "utm_medium*", "utm_medium");
-    const sourceCandidates = [
-      ["first_touch_source", get(row, "first_touch_source")],
-      ["utm_source", get(row, "utm_source*", "utm_source")],
-      ["utm_tag", query.get("utm_source") ?? ""],
-      ["click_id", get(row, "gclid*", "gclid") ? "google" : query.has("gclid") ? "google" : ""],
-      ["meta_lead_id", get(row, "FB lead id") ? (/^(true|yes|1)$/i.test(get(row, "Fb is organic")) ? "Organic Social" : "Facebook") : ""],
-      ["Marketing Source", get(row, "Marketing Source")],
-    ];
-    const attributed = sourceCandidates.find(([, raw]) => !["Unknown", "Other"].includes(sourceName(raw, medium)))
-      ?? sourceCandidates.find(([, raw]) => sourceName(raw, medium) === "Other");
     const captureRaw = get(row, "Marketing Source");
-    const captureMethod = /calendly/i.test(captureRaw) ? "Calendly" : /website/i.test(captureRaw) ? "Website form" : get(row, "FB lead id") ? "Meta lead form" : get(row, "Type") || "Not recorded";
+    const typeRaw = get(row, "Type");
+    // Bare platform labels also occur on lead forms; only explicit chat evidence qualifies.
+    const chatCapture = metaChatCapture(typeRaw) ?? metaChatCapture(captureRaw)
+      ?? (isMetaSource(captureRaw) ? metaChatCapture(`${captureRaw} ${typeRaw}`) : null);
+    const firstSource = get(row, "first_touch_source");
+    const firstMedium = get(row, "first_touch_medium");
+    const utmSource = get(row, "utm_source*", "utm_source");
+    const utmMedium = get(row, "utm_medium*", "utm_medium");
+    const tagSource = query.get("utm_source") ?? "";
+    const tagMedium = query.get("utm_medium") ?? "";
+    const metaId = get(row, "FB lead id");
+    const organicFlag = get(row, "Fb is organic");
+    const organicForm = /^(true|yes|1)$/i.test(organicFlag);
+    const paidForm = /^(false|no|0)$/i.test(organicFlag);
+    const submissionId = metaIdValue(metaId);
+    const metaSubmissions: MetaSubmission[] = submissionId ? [{
+      leadId: submissionId, formId: metaIdValue(get(row, "FB form id")), adId: metaIdValue(get(row, "Fb ad id")),
+      isOrganic: organicForm ? true : paidForm ? false : null,
+    }] : [];
+    const candidate = (method: string, raw: string, ownMedium: string) => ({
+      method, raw, medium: ownMedium,
+      source: sourceName(raw, isMetaSource(raw) ? ownMedium : medium),
+      evidence: raw ? [`${method}: ${raw}`, ...(ownMedium ? [`medium: ${ownMedium}`] : [])] : [],
+    });
+    const sourceCandidates = [
+      candidate("first_touch_source", firstSource, firstMedium),
+      candidate("utm_source", utmSource, utmMedium),
+      candidate("utm_tag", tagSource, tagMedium),
+      candidate("click_id", get(row, "gclid*", "gclid") ? "google" : query.has("gclid") ? "google" : "", ""),
+      { method: "meta_lead_id", raw: metaId, medium: "", source: !metaId ? "Unknown" : organicForm ? "Organic Social" : paidForm ? KOMMO_META_ADS_SOURCE : KOMMO_META_UNKNOWN_SOURCE,
+        evidence: metaId ? [`FB lead id present; Fb is organic=${organicFlag || "not recorded"}`] : [] },
+      candidate("Marketing Source", captureRaw, !firstSource && firstMedium ? firstMedium : !utmSource && utmMedium ? utmMedium : !tagSource ? tagMedium : ""),
+      candidate("Type", chatCapture ? typeRaw : "", ""),
+    ];
+    // Resolve the platform by existing priority; lower Meta proof may clarify paid/organic,
+    // but never replaces an earlier Google/other acquisition source with a capture route.
+    const attributed = sourceCandidates.find(({ source }) => !["Unknown", "Other"].includes(source))
+      ?? sourceCandidates.find(({ source }) => source === "Other");
+    if (attributed && [KOMMO_META_UNKNOWN_SOURCE, KOMMO_META_CHAT_SOURCE].includes(attributed.source)) {
+      const proof = sourceCandidates.slice(sourceCandidates.indexOf(attributed) + 1)
+        .find(({ source }) => source === KOMMO_META_ADS_SOURCE || source === "Organic Social");
+      if (proof) { attributed.source = proof.source; attributed.evidence.push(...proof.evidence); }
+      else if (chatCapture) attributed.source = KOMMO_META_CHAT_SOURCE;
+    }
+    if (attributed && chatCapture) attributed.evidence.push(`captureMethod: ${chatCapture}`, ...(captureRaw ? [`Marketing Source: ${captureRaw}`] : []), ...(typeRaw ? [`Type: ${typeRaw}`] : []));
+    if (attributed?.source === KOMMO_META_UNKNOWN_SOURCE) attributed.evidence.push("Meta platform recorded; paid, organic or chat attribution is not established by the available fields.");
+    const captureMethod = chatCapture ?? (/calendly/i.test(captureRaw) ? "Calendly" : /website/i.test(captureRaw) ? "Website form" : metaId ? "Meta lead form" : typeRaw || "Not recorded");
     const lead: KommoLead = {
       id: get(row, "ID"), row: index + headerRow + 2, title: get(row, "Lead title"), contact: get(row, "Main contact"),
       email: get(row, "Work email (contact)", "Personal email (contact)", "Other email (contact)").toLowerCase(),
@@ -216,10 +312,11 @@ export function normalizeKommoRows(rows: Cell[][], now = crmWallClockNow()): Kom
       owner: get(row, "Lead resp. user") || "Unassigned", stage: get(row, "Lead stage"), reachedStages: [get(row, "Lead stage")], pipeline: get(row, "Pipeline") || "Unknown",
       service: kommoService(qualifiedService || originalService), originalService, qualifiedService,
       country: countryName(get(row, "Country (contact)")), language: get(row, "Language (contact)") || "Unknown",
-      source: attributed ? sourceName(attributed[1], medium) : "Unknown", sourceRaw: attributed?.[1] ?? "", sourceMethod: attributed?.[0] ?? "unknown", captureMethod,
+      source: attributed?.source ?? "Unknown", sourceRaw: attributed?.raw ?? "", sourceMethod: attributed?.method ?? "unknown", sourceEvidence: attributed?.evidence ?? [], metaSubmissions, captureMethod,
       campaign: get(row, "first_touch_campaign", "utm_campaign*", "utm_campaign") || query.get("utm_campaign") || "Not recorded", medium,
       relevancy: get(row, "Relevancy"), paymentStatus: get(row, "Payment status"), sale: kommoNumber(get(row, "Sale")),
       payments: ["Payment 1", "Payment 2", "Payment 3"].map((f) => kommoNumber(get(row, f)) ?? 0), touches: kommoNumber(get(row, "Touches made")),
+      paymentAmounts: ["Payment 1", "Payment 2", "Payment 3"].map((f) => kommoNumber(get(row, f))),
       migrated: Boolean(oldId || get(row, "Date Created(from Planfix)")), oldId, createdAt, importedAt, modifiedAt: date("Last Modified"),
       firstContactAt: date("First contact at", createdAt), inWorkAt: date("TD_In work", createdAt), agreementSentAt: date("Agreement sent at", createdAt),
       agreementSignedAt: date("Agreement signed at", createdAt), firstPaymentAt: date("First payment at", createdAt), secondPaymentAt: date("Second payment at", createdAt),
@@ -275,7 +372,12 @@ export function cleanKommoLeads(leads: KommoLead[]) {
     if (lead.test) { tests++; continue; }
     const previous = byId.get(lead.id);
     if (previous) repeatedIds++;
-    if (!previous || (lead.modifiedAt?.getTime() ?? lead.row) >= (previous.modifiedAt?.getTime() ?? previous.row)) byId.set(lead.id, lead);
+    const latest = !previous || (lead.modifiedAt?.getTime() ?? lead.row) >= (previous.modifiedAt?.getTime() ?? previous.row);
+    if (previous) byId.set(lead.id, {
+      ...(latest ? lead : previous),
+      metaSubmissions: mergeMetaSubmissions([...(previous.metaSubmissions ?? []), ...(lead.metaSubmissions ?? [])]),
+    });
+    else byId.set(lead.id, lead);
   }
   const groups = new Map<string, KommoLead[]>();
   for (const lead of byId.values()) {
@@ -300,11 +402,16 @@ export function cleanKommoLeads(leads: KommoLead[]) {
       const combined: KommoLead = {
         ...latest, createdAt: earliest(cluster, "createdAt"), migrated: cluster.some((l) => l.migrated),
         relevancy: [...candidates].reverse().find((l) => l.relevancy)?.relevancy ?? "",
-        source: source.source, sourceRaw: source.sourceRaw, sourceMethod: source.sourceMethod, campaign: source.campaign, medium: source.medium,
+        source: source.source, sourceRaw: source.sourceRaw, sourceMethod: source.sourceMethod, sourceEvidence: source.sourceEvidence, campaign: source.campaign, medium: source.medium,
+        metaSubmissions: mergeMetaSubmissions(cluster.flatMap((lead) => lead.metaSubmissions ?? [])),
         reachedStages: [...new Set(cluster.flatMap((l) => l.reachedStages))],
         paymentStatus: [...chronological].reverse().find((l) => l.paymentStatus)?.paymentStatus ?? "",
         // Monetary amounts belong to the same opportunity; never sum duplicated deal values.
         sale: Math.max(...cluster.map((l) => l.sale ?? 0)), payments: [0, 1, 2].map((i) => Math.max(...cluster.map((l) => l.payments[i]))),
+        paymentAmounts: [0, 1, 2].map((i) => {
+          const amounts = cluster.flatMap((l) => l.paymentAmounts?.[i] == null ? [] : [l.paymentAmounts[i]!]);
+          return amounts.length ? Math.max(...amounts) : null;
+        }),
         mergedIds: cluster.flatMap((l) => l.mergedIds), issues: cluster.flatMap((l) => l.issues), filled: [...new Set(cluster.flatMap((l) => l.filled))],
       };
       const dates = ["firstContactAt", "inWorkAt", "agreementSentAt", "agreementSignedAt", "firstPaymentAt", "secondPaymentAt", "thirdPaymentAt", "fullPaymentAt", "handoverAt", "completedAt", "meetingBookedAt", "meetingHeldAt"] as const;

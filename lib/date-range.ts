@@ -58,15 +58,30 @@ export function addMonths(value: string, months: number): string {
   return isoDate(date);
 }
 
-export function dateRangeError(range: DateRange): string | null {
+export function dateRangeError(range: DateRange, maxDay?: string): string | null {
   if ((range.from && !parseISODate(range.from)) || (range.to && !parseISODate(range.to))) {
     return "Enter a valid date in each field.";
   }
-  return range.from && range.to && range.from > range.to ? "From date must be on or before To date." : null;
+  if (range.from && range.to && range.from > range.to) return "From date must be on or before To date.";
+  if (maxDay !== undefined) {
+    if (!parseISODate(maxDay)) return "Enter a valid maximum date.";
+    if (range.from > maxDay || range.to > maxDay) return `Dates must be on or before ${maxDay}.`;
+  }
+  return null;
+}
+
+/** Limit endpoints to maxDay; an open end becomes the explicit maximum. */
+export function clampDateRange(range: DateRange, maxDay: string): DateRange {
+  if (!parseISODate(maxDay)) return { ...range };
+  return { from: range.from > maxDay ? maxDay : range.from, to: !range.to || range.to > maxDay ? maxDay : range.to };
 }
 
 // Bounds describe the export, not selection limits. Finance can predate the CRM.
-export function presetDateRange(preset: DateRangePreset, anchorDate: string, bounds?: DateRange): DateRange {
+export function presetDateRange(preset: DateRangePreset, anchorDate: string, bounds?: DateRange, maxDay?: string): DateRange {
+  if (maxDay && parseISODate(maxDay)) {
+    const anchor = parseISODate(anchorDate) && anchorDate > maxDay ? maxDay : anchorDate;
+    return clampDateRange(presetDateRange(preset, anchor, bounds), maxDay);
+  }
   if (preset === "alltime") return bounds && !dateRangeError(bounds) ? { ...bounds } : { from: "", to: "" };
   if (!parseISODate(anchorDate)) return { from: "", to: "" };
   const month = startOfMonth(anchorDate);

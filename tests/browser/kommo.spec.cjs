@@ -55,8 +55,8 @@ test("Kommo upload, scope, all pages, persistence, mobile, and PDF downloads", a
     if (name === "Channels & Services") {
       expect(await page.locator("[data-chart=acquisition]").count()).toBeGreaterThan(3);
       await expect(page.locator("[data-chart=cost]").first()).toBeVisible();
-      await page.getByRole("heading", { name: "Channel acquisition & lead quality (1/2)", exact: false }).locator("../..").screenshot({ path: testInfo.outputPath("channel-quality-chart.png") });
-      await page.getByRole("heading", { name: "Service conversion comparison (1/2)", exact: false }).locator("../..").screenshot({ path: testInfo.outputPath("service-conversion-chart.png") });
+      await page.getByRole("heading", { name: /^Channel acquisition & lead quality/ }).first().locator("../..").screenshot({ path: testInfo.outputPath("channel-quality-chart.png") });
+      await page.getByRole("heading", { name: /^Service conversion comparison/ }).first().locator("../..").screenshot({ path: testInfo.outputPath("service-conversion-chart.png") });
       await page.locator("[data-chart=cost]").first().locator("..").screenshot({ path: testInfo.outputPath("channel-cost-chart.png") });
       await page.screenshot({ path: testInfo.outputPath("channels-services.png"), fullPage: true });
     }

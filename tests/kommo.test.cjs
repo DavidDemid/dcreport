@@ -96,8 +96,124 @@ test("unknown UTM token does not override recognized acquisition source", () => 
 
 test("Meta form evidence maps source while mixed legacy source remains mixed", () => {
   const d = dataset([{ "FB lead id": "987", "Fb is organic": "false" }, { "Marketing Source": "Other (direct email, phone call, referral etc.)" }]);
-  assert.equal(d.leads[0].source, "Facebook / Instagram");
+  assert.equal(d.leads[0].source, "Facebook / Instagram Ads");
   assert.equal(d.leads[1].source, "Direct / email / referral (mixed)");
+});
+
+test("bare Meta labels remain unresolved while explicit chat and paid evidence stay separate", () => {
+  const cases = [
+    [{ "Marketing Source": "Facebook" }, k.KOMMO_META_UNKNOWN_SOURCE, "Not recorded"],
+    [{ "Marketing Source": "Instagram" }, k.KOMMO_META_UNKNOWN_SOURCE, "Not recorded"],
+    [{ "Marketing Source": "Facebook / Instagram" }, k.KOMMO_META_UNKNOWN_SOURCE, "Not recorded"],
+    [{ "Marketing Source": "Facebook", Type: "Othe" }, k.KOMMO_META_UNKNOWN_SOURCE, "Othe"],
+    [{ "Marketing Source": "Facebook / Instagram", Type: "Chat" }, k.KOMMO_META_CHAT_SOURCE, k.KOMMO_META_CHAT_SOURCE],
+    [{ "Marketing Source": "Instagram", Type: "Chat" }, k.KOMMO_META_CHAT_SOURCE, "Instagram chat"],
+    [{ "Marketing Source": "Facebook Messenger" }, k.KOMMO_META_CHAT_SOURCE, "Messenger"],
+    [{ "Marketing Source": "Instagram DM" }, k.KOMMO_META_CHAT_SOURCE, "Instagram chat"],
+    [{ Type: "Facebook Messenger" }, k.KOMMO_META_CHAT_SOURCE, "Messenger"],
+    [{ "Marketing Source": "Facebook ads" }, k.KOMMO_META_ADS_SOURCE, "Not recorded"],
+    [{ "Marketing Source": "Instagram advertising" }, k.KOMMO_META_ADS_SOURCE, "Not recorded"],
+    [{ "utm_source*": "facebook" }, k.KOMMO_META_UNKNOWN_SOURCE, "Not recorded"],
+    [{ first_touch_source: "instagram" }, k.KOMMO_META_UNKNOWN_SOURCE, "Not recorded"],
+    [{ "utm_source*": "fb", "utm_medium*": "social" }, k.KOMMO_META_UNKNOWN_SOURCE, "Not recorded"],
+    [{ "utm_source*": "ig", "utm_medium*": "paid_social" }, k.KOMMO_META_ADS_SOURCE, "Not recorded"],
+    [{ "utm_source*": "fb", "utm_medium*": "cpc", "Marketing Source": "Instagram" }, k.KOMMO_META_ADS_SOURCE, "Not recorded"],
+    [{ "utm_tag": "utm_source=ig&utm_medium=paid_social", "Marketing Source": "Facebook" }, k.KOMMO_META_ADS_SOURCE, "Not recorded"],
+    [{ "FB lead id": "example-paid", "Fb is organic": "false" }, k.KOMMO_META_ADS_SOURCE, "Meta lead form"],
+    [{ "FB lead id": "example-unknown" }, k.KOMMO_META_UNKNOWN_SOURCE, "Meta lead form"],
+    [{ "FB lead id": "example-organic", "Fb is organic": "true", "Marketing Source": "Facebook ads" }, "Organic Social", "Meta lead form"],
+  ];
+  for (const [record, source, capture] of cases) {
+    const lead = dataset([record]).leads[0];
+    assert.equal(lead.source, source, JSON.stringify(record));
+    assert.equal(lead.captureMethod, capture, JSON.stringify(record));
+  }
+});
+
+test("paid acquisition retains independent chat capture, field priority and source evidence", () => {
+  const cases = [
+    [{ first_touch_source: "google", "utm_source*": "fb", "utm_medium*": "paid_social", "Marketing Source": "Instagram DM" }, "Google Ads", "first_touch_source", "google", "Instagram chat"],
+    [{ "utm_source*": "google", "FB lead id": "paid-id", "Fb is organic": "false", "Marketing Source": "Facebook Messenger" }, "Google Ads", "utm_source", "google", "Messenger"],
+    [{ first_touch_source: "fb", "FB lead id": "paid-id", "Fb is organic": "false", "Marketing Source": "Facebook", Type: "Chat" }, k.KOMMO_META_ADS_SOURCE, "first_touch_source", "fb", "Messenger"],
+    [{ "utm_source*": "facebook", "utm_tag": "utm_source=fb&utm_medium=paid_social", "Marketing Source": "Instagram", Type: "Chat" }, k.KOMMO_META_ADS_SOURCE, "utm_source", "facebook", "Instagram chat"],
+    [{ "FB lead id": "paid-id", "Fb is organic": "false", "Marketing Source": "Facebook chat" }, k.KOMMO_META_ADS_SOURCE, "meta_lead_id", "paid-id", "Messenger"],
+  ];
+  for (const [record, source, method, raw, capture] of cases) {
+    const lead = dataset([record]).leads[0];
+    assert.equal(lead.source, source);
+    assert.equal(lead.sourceMethod, method);
+    assert.equal(lead.sourceRaw, raw);
+    assert.equal(lead.captureMethod, capture);
+    assert.ok(lead.sourceEvidence.some((value) => value === `captureMethod: ${capture}`));
+  }
+  const enriched = dataset([{ first_touch_source: "fb", "FB lead id": "paid-id", "Fb is organic": "false" }]).leads[0];
+  assert.ok(enriched.sourceEvidence.some((value) => /Fb is organic=false/.test(value)));
+});
+
+test("bare platform labels do not override original source or imply chat capture on forms", () => {
+  const cases = [
+    [{ "Marketing Source": "Facebook", "utm_source*": "google", "FB lead id": "paid", "Fb is organic": false }, "Google Ads", "Meta lead form"],
+    [{ "Marketing Source": "Instagram", "FB lead id": "paid", "Fb is organic": false }, k.KOMMO_META_ADS_SOURCE, "Meta lead form"],
+    [{ "Marketing Source": "Facebook", "FB lead id": "organic", "Fb is organic": true }, "Organic Social", "Meta lead form"],
+    [{ "Marketing Source": "Facebook", "FB lead id": "unknown" }, k.KOMMO_META_UNKNOWN_SOURCE, "Meta lead form"],
+    [{ "Marketing Source": "Facebook", "Fb ad id": "ad-only" }, k.KOMMO_META_UNKNOWN_SOURCE, "Not recorded"],
+  ];
+  for (const [record, source, capture] of cases) {
+    const lead = dataset([record]).leads[0];
+    assert.equal(lead.source, source);
+    assert.equal(lead.captureMethod, capture);
+  }
+  const uncertain = dataset([{ "Marketing Source": "Facebook" }]).leads[0];
+  assert.equal(uncertain.sourceRaw, "Facebook");
+  assert.equal(uncertain.sourceMethod, "Marketing Source");
+  assert.ok(uncertain.sourceEvidence.some((value) => /not established/.test(value)));
+});
+
+test("Meta paid evidence uses the matching source/medium pair and rejects unpaid labels", () => {
+  const cases = [
+    [{ first_touch_source: "facebook", first_touch_medium: "organic", "utm_source*": "fb", "utm_medium*": "cpc" }, "Organic Social"],
+    [{ first_touch_source: "unknown", first_touch_medium: "cpc", "utm_source*": "fb", "utm_medium*": "social" }, k.KOMMO_META_UNKNOWN_SOURCE],
+    [{ "utm_source*": "facebook", "utm_medium*": "unpaid_social" }, "Organic Social"],
+    [{ "utm_source*": "facebook", "utm_medium*": "not_paid" }, "Organic Social"],
+    [{ "utm_source*": "fb", "utm_medium*": "paid_social", "FB lead id": "organic-id", "Fb is organic": "true" }, k.KOMMO_META_ADS_SOURCE],
+  ];
+  for (const [record, expected] of cases) assert.equal(dataset([record]).leads[0].source, expected);
+});
+
+test("cleaning retains original paid Meta acquisition when a later record is a chat", () => {
+  const d = dataset([
+    { "Marketing Source": "Facebook ads", "Date Created": "01.10.2026", "Last Modified": "02.10.2026", "Work email (contact)": "example@example.com", "Qualified service": "LT citizenship" },
+    { "Marketing Source": "Instagram DM", "Date Created": "05.10.2026", "Work email (contact)": "example@example.com", "Qualified service": "LT citizenship" },
+  ]);
+  const cleaned = k.cleanKommoLeads(d.leads);
+  assert.equal(cleaned.records.length, 1);
+  assert.equal(cleaned.records[0].source, k.KOMMO_META_ADS_SOURCE);
+  assert.equal(cleaned.records[0].sourceRaw, "Facebook ads");
+  assert.equal(cleaned.records[0].sourceMethod, "Marketing Source");
+  assert.equal(cleaned.records[0].captureMethod, "Instagram chat");
+  assert.deepEqual(cleaned.records[0].sourceEvidence, d.leads[0].sourceEvidence);
+  assert.deepEqual(cleaned.records[0].mergedIds, ["1", "2"]);
+});
+
+test("Created on and Modified on aliases preserve actual export headers and timestamp validation", () => {
+  const headers = ["ID", "Lead stage", "Created on", "Modified on", "Marketing Source", "First contact at"];
+  const d = k.normalizeKommoRows([headers, ["1", "New", "01.10.2026 10:00:00", "21.10.2026 15:00:00", "Facebook", "01.10.2026 10:30:00"]], now);
+  const canonical = dataset([{ "Marketing Source": "Facebook", "First contact at": "01.10.2026 10:30:00" }]);
+  assert.equal(d.asOf.toISOString(), canonical.asOf.toISOString());
+  for (const field of ["createdAt", "importedAt", "modifiedAt", "firstContactAt"]) assert.equal(d.leads[0][field].toISOString(), canonical.leads[0][field].toISOString());
+  assert.equal(d.leads[0].source, k.KOMMO_META_UNKNOWN_SOURCE);
+  assert.deepEqual(d.headers, headers);
+  assert.ok(d.leads[0].filled.includes("Created on"));
+  assert.ok(d.leads[0].filled.includes("Modified on"));
+  assert.ok(!d.leads[0].filled.includes("Date Created"));
+  assert.ok(!d.leads[0].filled.includes("Last Modified"));
+  const both = k.normalizeKommoRows([
+    ["ID", "Lead stage", "Date Created", "Created on", "Last Modified", "Modified on"],
+    ["1", "New", "01.10.2026", "10.10.2026", "20.10.2026", "21.10.2026"],
+  ], now);
+  assert.equal(both.leads[0].createdAt.toISOString(), "2026-10-01T00:00:00.000Z");
+  assert.equal(both.leads[0].modifiedAt.toISOString(), "2026-10-20T00:00:00.000Z");
+  assert.equal(both.asOf.toISOString(), "2026-10-20T00:00:00.000Z");
 });
 
 test("duplicate consolidation preserves acquisition and updated relevance", () => {

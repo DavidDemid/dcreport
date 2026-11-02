@@ -70,6 +70,75 @@ test("range validation permits same-day, unbounded, historical and future ranges
   assert.match(d.dateRangeError({ from: "2026-02-30", to: "" }), /valid date/);
 });
 
+test("an optional maximum rejects either future endpoint without changing generic validation", () => {
+  const today = "2026-10-27";
+  for (const range of [
+    { from: today, to: today }, { from: "", to: today }, { from: "1900-01-01", to: "" }, { from: "", to: "" },
+  ]) assert.equal(d.dateRangeError(range, today), null);
+  for (const range of [
+    { from: "2026-10-28", to: "" }, { from: "", to: "2026-10-28" },
+    { from: "2026-10-28", to: "2026-10-29" }, { from: "2026-10-01", to: "2027-01-01" },
+  ]) {
+    assert.match(d.dateRangeError(range, today), /on or before 2026-10-27/);
+    assert.equal(d.dateRangeError(range), null);
+  }
+  assert.match(d.dateRangeError({ from: "2026-02-30", to: today }, today), /valid date/);
+  assert.match(d.dateRangeError({ from: today, to: "2026-10-26" }, today), /From date/);
+  assert.match(d.dateRangeError({ from: today, to: today }, "2026-02-30"), /valid maximum/);
+});
+
+test("upper-bound clamping handles future exports and open ends without mutating inputs", () => {
+  const today = "2026-10-27";
+  const cases = [
+    [{ from: "2026-09-01", to: "2027-01-01" }, { from: "2026-09-01", to: today }],
+    [{ from: "2027-01-01", to: "2027-02-01" }, { from: today, to: today }],
+    [{ from: "2026-09-01", to: "" }, { from: "2026-09-01", to: today }],
+    [{ from: "", to: "" }, { from: "", to: today }],
+    [{ from: "2026-09-01", to: "2026-09-30" }, { from: "2026-09-01", to: "2026-09-30" }],
+  ];
+  for (const [input, expected] of cases) {
+    const original = { ...input };
+    const result = d.clampDateRange(input, today);
+    assert.deepEqual(result, expected);
+    assert.deepEqual(input, original);
+    assert.notEqual(result, input);
+    assert.equal(d.dateRangeError(result, today), null);
+  }
+  assert.deepEqual(d.clampDateRange({ from: "2024-02-01", to: "2024-03-01" }, "2024-02-29"), { from: "2024-02-01", to: "2024-02-29" });
+});
+
+test("today limits do not move historical relative presets to the actual current date", () => {
+  const anchor = "2026-10-21", today = "2026-10-27";
+  const bounds = { from: "2026-01-01", to: "2027-12-31" };
+  for (const { id } of d.DATE_RANGE_PRESETS) {
+    const result = d.presetDateRange(id, anchor, bounds, today);
+    if (id === "alltime") assert.deepEqual(result, { from: bounds.from, to: today });
+    else assert.deepEqual(result, d.presetDateRange(id, anchor, bounds));
+    assert.equal(d.dateRangeError(result, today), null);
+  }
+  assert.deepEqual(d.presetDateRange("last7", anchor, bounds, today), { from: "2026-10-15", to: anchor });
+  assert.deepEqual(d.presetDateRange("alltime", anchor, undefined, today), { from: "", to: today });
+  assert.equal(bounds.to, "2027-12-31");
+});
+
+test("future snapshot anchors and month/year presets are capped at actual today", () => {
+  const today = "2026-10-27", futureAnchor = "2027-01-15";
+  assert.deepEqual(d.presetDateRange("thismonth", futureAnchor, undefined, today), { from: "2026-10-01", to: today });
+  assert.deepEqual(d.presetDateRange("thisyear", futureAnchor, undefined, today), { from: "2026-01-01", to: today });
+  assert.deepEqual(d.presetDateRange("last7", futureAnchor, undefined, today), { from: "2026-10-21", to: today });
+  assert.deepEqual(d.presetDateRange("today", futureAnchor, undefined, today), { from: today, to: today });
+  for (const { id } of d.DATE_RANGE_PRESETS) {
+    assert.equal(d.dateRangeError(d.presetDateRange(id, futureAnchor, { from: "2027-01-01", to: "2027-01-15" }, today), today), null);
+  }
+  assert.deepEqual(d.presetDateRange("thismonth", futureAnchor), { from: "2027-01-01", to: futureAnchor });
+});
+
+test("maximum-day presets retain inclusive leap-day and year-boundary ranges", () => {
+  assert.deepEqual(d.presetDateRange("thismonth", "2024-03-15", undefined, "2024-02-29"), { from: "2024-02-01", to: "2024-02-29" });
+  assert.deepEqual(d.presetDateRange("thisyear", "2027-01-15", undefined, "2026-12-31"), { from: "2026-01-01", to: "2026-12-31" });
+  assert.deepEqual(d.presetDateRange("last7", "2027-01-15", undefined, "2027-01-01"), { from: "2026-12-26", to: "2027-01-01" });
+});
+
 test("Monday-first calendars contain each real date once in a stable 6-week grid", () => {
   const feb = d.calendarDays("2024-02-01");
   assert.equal(feb.length, 42);

@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, X } from "lucide-react";
 import clsx from "clsx";
 import {
-  addDays, addMonths, calendarDays, DATE_RANGE_PRESETS, dateRangeError, formatDateRange,
+  addDays, addMonths, calendarDays, clampDateRange, DATE_RANGE_PRESETS, dateRangeError, formatDateRange,
   localISODate, parseISODate, presetDateRange, startOfMonth,
 } from "@/lib/date-range";
 import type { DateRange, DateRangePreset } from "@/lib/date-range";
@@ -16,7 +16,7 @@ export type { DateRange } from "@/lib/date-range";
 export type DateRangePickerProps = {
   value: DateRange;
   onChange: (range: DateRange) => void;
-  /** Export extent for All time; does not restrict selectable dates. */
+  /** Export extent for All time; capped at browser-local today, not a historical selection limit. */
   bounds?: DateRange;
   /** ISO day used by relative presets; defaults to the browser's local calendar date. */
   anchorDate?: string;
@@ -56,10 +56,13 @@ export function DateRangePicker({ value, onChange, bounds, anchorDate, disabled 
   const fromRef = useRef<HTMLInputElement>(null);
   const toRef = useRef<HTMLInputElement>(null);
   const today = localISODate(new Date());
-  const anchor = anchorDate && parseISODate(anchorDate) ? anchorDate : today;
-  const error = invalidInputs.from || invalidInputs.to ? "Enter a valid date in each field." : dateRangeError(draft);
+  const latestMonth = startOfMonth(today);
+  const anchor = anchorDate && parseISODate(anchorDate) && anchorDate < today ? anchorDate : today;
+  const futureInput = Boolean((parseISODate(draft.from) && draft.from > today) || (parseISODate(draft.to) && draft.to > today));
+  const error = futureInput ? language === "ru" ? "Нельзя выбрать дату позже сегодняшнего дня." : "Dates cannot be later than today."
+    : invalidInputs.from || invalidInputs.to ? "Enter a valid date in each field." : dateRangeError(draft, today);
   const selectedPreset = DATE_RANGE_PRESETS.find(({ id: preset }) => {
-    const range = presetDateRange(preset, anchor, bounds);
+    const range = presetDateRange(preset, anchor, bounds, today);
     return draft.from === range.from && draft.to === range.to;
   })?.id || "custom";
 
@@ -69,8 +72,9 @@ export function DateRangePicker({ value, onChange, bounds, anchorDate, disabled 
   }
 
   function show() {
-    const firstDay = [value.from, value.to, anchor].find((day) => parseISODate(day)) || today;
-    setDraft({ ...value });
+    const range = clampDateRange(value, today);
+    const firstDay = [range.from, range.to, anchor].find((day) => parseISODate(day)) || today;
+    setDraft(range);
     setInvalidInputs({ from: false, to: false });
     setMonth(startOfMonth(firstDay));
     setFocusedDay(firstDay);
@@ -161,7 +165,7 @@ export function DateRangePicker({ value, onChange, bounds, anchorDate, disabled 
   }
 
   function choosePreset(preset: DateRangePreset) {
-    const range = presetDateRange(preset, anchor, bounds);
+    const range = presetDateRange(preset, anchor, bounds, today);
     setDraft(range);
     setInvalidInputs({ from: false, to: false });
     const day = range.from || range.to || anchor;
@@ -177,12 +181,14 @@ export function DateRangePicker({ value, onChange, bounds, anchorDate, disabled 
     setSelectingEnd(false);
     setHoverDay("");
     if (parseISODate(day)) {
-      setMonth(startOfMonth(day));
-      setFocusedDay(day);
+      const focus = day > today ? today : day;
+      setMonth(startOfMonth(focus));
+      setFocusedDay(focus);
     }
   }
 
   function chooseDay(day: string) {
+    if (disabled || !parseISODate(day) || day > today) return;
     setInvalidInputs({ from: false, to: false });
     if (selectingEnd && draft.from) {
       setDraft({ from: day < draft.from ? day : draft.from, to: day < draft.from ? draft.from : day });
@@ -197,11 +203,12 @@ export function DateRangePicker({ value, onChange, bounds, anchorDate, disabled 
 
   function focusDate(day: string) {
     if (!parseISODate(day)) return;
+    if (day > today) day = today;
     setFocusedDay(day);
     const twoMonths = window.matchMedia("(min-width: 768px)").matches;
     const endMonth = twoMonths ? addMonths(month, 1) || month : month;
     if (day < month || startOfMonth(day) > endMonth) setMonth(startOfMonth(day));
-    requestAnimationFrame(() => panelRef.current?.querySelector<HTMLButtonElement>(`[data-date="${day}"]`)?.focus());
+    requestAnimationFrame(() => panelRef.current?.querySelector<HTMLButtonElement>(`[data-date="${day}"]:not(:disabled)`)?.focus());
   }
 
   function dayKeys(event: KeyboardEvent<HTMLButtonElement>, day: string) {
@@ -218,6 +225,7 @@ export function DateRangePicker({ value, onChange, bounds, anchorDate, disabled 
   }
 
   function jumpMonth(visibleMonth: string, offset: number) {
+    if (!parseISODate(visibleMonth) || startOfMonth(visibleMonth) > latestMonth) return;
     const next = addMonths(startOfMonth(visibleMonth), -offset);
     if (next) { setMonth(next); setFocusedDay(visibleMonth); }
   }
@@ -227,31 +235,38 @@ export function DateRangePicker({ value, onChange, bounds, anchorDate, disabled 
     const year = Number(visibleMonth.slice(0, 4));
     const monthIndex = Number(visibleMonth.slice(5, 7)) - 1;
     const label = `${months[monthIndex]} ${year}`;
+    const futureMonth = visibleMonth > latestMonth;
+    const maxYear = Number(today.slice(0, 4));
+    const maxMonthIndex = Number(today.slice(5, 7)) - 1;
     const years = [anchor, today, draft.from, draft.to, bounds?.from, bounds?.to, visibleMonth]
       .filter((day): day is string => Boolean(day && parseISODate(day))).map((day) => Number(day.slice(0, 4)));
     const minYear = Math.min(1900, ...years);
-    const maxYear = Math.min(9999, Math.max(Number(today.slice(0, 4)) + 10, ...years));
     const days = calendarDays(visibleMonth);
-    const tabDay = days.includes(focusedDay) ? focusedDay : days.includes(draft.from) ? draft.from : days.includes(today) ? today : visibleMonth;
+    const selectable = days.filter((day): day is string => Boolean(day && day <= today));
+    const tabDay = [focusedDay, draft.from, today, visibleMonth].find((day) => selectable.includes(day)) || selectable[0];
+    const nextMonth = addMonths(visibleMonth, 1);
     const preview = selectingEnd && hoverDay ? { from: hoverDay < draft.from ? hoverDay : draft.from, to: hoverDay < draft.from ? draft.from : hoverDay } : draft;
     return <section key={offset} aria-label={`${offset ? "Second" : "First"} calendar`} className={clsx("min-w-0", offset === 1 && "hidden md:block")}>
       <div className="mb-3 flex items-center gap-1">
         <button type="button" title="Previous month" aria-label={`Previous month, ${offset ? "second" : "first"} calendar`} disabled={!addMonths(month, -1)} onClick={() => jumpMonth(addMonths(visibleMonth, -1), offset)} className={iconButton}><ChevronLeft size={16} aria-hidden="true" /></button>
-        <select aria-label={`Month, ${offset ? "second" : "first"} calendar`} value={monthIndex} onChange={(event) => jumpMonth(`${String(year).padStart(4, "0")}-${String(Number(event.target.value) + 1).padStart(2, "0")}-01`, offset)} className={`h-9 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-1 text-sm font-semibold text-slate-800 ${focusRing}`}>
-          {months.map((name, index) => <option key={name} value={index}>{name}</option>)}
-        </select>
-        <select aria-label={`Year, ${offset ? "second" : "first"} calendar`} value={year} onChange={(event) => jumpMonth(`${event.target.value.padStart(4, "0")}-${String(monthIndex + 1).padStart(2, "0")}-01`, offset)} className={`h-9 w-[76px] shrink-0 rounded-md border border-slate-200 bg-white px-1 text-sm font-semibold text-slate-800 ${focusRing}`}>
-          {Array.from({ length: maxYear - minYear + 1 }, (_, index) => minYear + index).map((item) => <option key={item} value={item}>{item}</option>)}
-        </select>
-        <button type="button" title="Next month" aria-label={`Next month, ${offset ? "second" : "first"} calendar`} disabled={!addMonths(visibleMonth, 1)} onClick={() => jumpMonth(addMonths(visibleMonth, 1), offset)} className={iconButton}><ChevronRight size={16} aria-hidden="true" /></button>
+        {futureMonth ? <div className="flex h-9 min-w-0 flex-1 items-center justify-center text-sm font-semibold text-slate-500">{label}</div> : <>
+          <select aria-label={`Month, ${offset ? "second" : "first"} calendar`} value={monthIndex} onChange={(event) => jumpMonth(`${String(year).padStart(4, "0")}-${String(Number(event.target.value) + 1).padStart(2, "0")}-01`, offset)} className={`h-9 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-1 text-sm font-semibold text-slate-800 ${focusRing}`}>
+            {months.map((name, index) => (year < maxYear || index <= maxMonthIndex) && <option key={name} value={index}>{name}</option>)}
+          </select>
+          <select aria-label={`Year, ${offset ? "second" : "first"} calendar`} value={year} onChange={(event) => jumpMonth(`${event.target.value.padStart(4, "0")}-${String(Number(event.target.value) === maxYear ? Math.min(monthIndex, maxMonthIndex) + 1 : monthIndex + 1).padStart(2, "0")}-01`, offset)} className={`h-9 w-[76px] shrink-0 rounded-md border border-slate-200 bg-white px-1 text-sm font-semibold text-slate-800 ${focusRing}`}>
+            {Array.from({ length: maxYear - minYear + 1 }, (_, index) => minYear + index).map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </>}
+        <button type="button" title="Next month" aria-label={`Next month, ${offset ? "second" : "first"} calendar`} disabled={!nextMonth || nextMonth > latestMonth} onClick={() => jumpMonth(nextMonth, offset)} className={iconButton}><ChevronRight size={16} aria-hidden="true" /></button>
       </div>
       <table role="grid" aria-label={label} className="w-full table-fixed border-collapse text-center text-sm" onMouseLeave={() => setHoverDay("")}>
         <thead><tr>{weekdays.map((name) => <th key={name.long} scope="col" abbr={name.long} className="h-8 text-xs font-medium text-slate-500"><span aria-hidden="true">{language === "en" ? name.short.slice(0, 2) : name.short}</span><span className="sr-only">{name.long}</span></th>)}</tr></thead>
         <tbody>{Array.from({ length: 6 }, (_, row) => <tr key={row}>{days.slice(row * 7, row * 7 + 7).map((day, column) => {
-          const endpoint = Boolean(day && (day === preview.from || day === preview.to));
-          const inRange = Boolean(day && preview.from && preview.to && day >= preview.from && day <= preview.to);
+          const available = Boolean(day && day <= today);
+          const endpoint = available && (day === preview.from || day === preview.to);
+          const inRange = Boolean(available && day && preview.from && preview.to && day >= preview.from && day <= preview.to);
           return <td key={column} aria-selected={day ? inRange : undefined} className={clsx("h-9 p-0", inRange && "bg-blue-50", day === preview.from && "rounded-l-md", day === preview.to && "rounded-r-md")}>
-            {day && <button type="button" data-date={day} aria-label={dayLabel.format(parseISODate(day)!)} aria-current={day === today ? "date" : undefined} tabIndex={day === tabDay ? 0 : -1} onClick={() => chooseDay(day)} onFocus={() => setFocusedDay(day)} onMouseEnter={() => selectingEnd && setHoverDay(day)} onKeyDown={(event) => dayKeys(event, day)} className={clsx("relative mx-auto flex h-9 w-full max-w-10 items-center justify-center rounded-md font-medium", focusRing, endpoint ? "bg-blue-700 text-white hover:bg-blue-800" : "text-slate-700 hover:bg-blue-100", day === today && !endpoint && "font-bold text-blue-700 underline decoration-blue-500 underline-offset-4")}>{Number(day.slice(8))}</button>}
+            {day && <button type="button" data-date={day} disabled={!available} aria-label={dayLabel.format(parseISODate(day)!)} aria-current={day === today ? "date" : undefined} tabIndex={day === tabDay ? 0 : -1} onClick={() => chooseDay(day)} onFocus={() => setFocusedDay(day)} onMouseEnter={() => available && selectingEnd && setHoverDay(day)} onKeyDown={(event) => dayKeys(event, day)} className={clsx("relative mx-auto flex h-9 w-full max-w-10 items-center justify-center rounded-md font-medium disabled:cursor-not-allowed disabled:opacity-30", focusRing, endpoint ? "bg-blue-700 text-white hover:bg-blue-800" : available ? "text-slate-700 hover:bg-blue-100" : "text-slate-400", day === today && !endpoint && "font-bold text-blue-700 underline decoration-blue-500 underline-offset-4")}>{Number(day.slice(8))}</button>}
           </td>;
         })}</tr>)}</tbody>
       </table>
@@ -259,8 +274,9 @@ export function DateRangePicker({ value, onChange, bounds, anchorDate, disabled 
   }
 
   function apply() {
-    if (error || disabled || fromRef.current?.validity.badInput || toRef.current?.validity.badInput) return;
-    onChange({ ...draft });
+    const maxDay = localISODate(new Date());
+    if (error || disabled || dateRangeError(draft, maxDay) || (fromRef.current && !fromRef.current.validity.valid) || (toRef.current && !toRef.current.validity.valid)) return;
+    onChange(clampDateRange(draft, maxDay));
     close();
   }
 
@@ -282,7 +298,7 @@ export function DateRangePicker({ value, onChange, bounds, anchorDate, disabled 
         <div className="min-w-0 p-3 sm:p-4">
           <select aria-label="Date preset" value={selectedPreset} onChange={(event) => event.target.value !== "custom" && choosePreset(event.target.value as DateRangePreset)} className={`mb-3 h-10 w-full rounded-md border border-slate-300 bg-white px-2 text-sm md:hidden ${focusRing}`}><option value="custom">Custom dates</option>{DATE_RANGE_PRESETS.map(({ id: preset, label }) => <option key={preset} value={preset}>{label}</option>)}</select>
           <div className="mb-4 grid grid-cols-2 gap-3">
-            {(["from", "to"] as const).map((key) => <label key={key} className="grid min-w-0 gap-1 text-xs font-semibold text-slate-600">{key === "from" ? "From" : "To"}<input ref={key === "from" ? fromRef : toRef} aria-label={key === "from" ? "From date" : "To date"} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} type="date" min="0001-01-01" max="9999-12-31" value={draft[key]} onChange={(event) => editDate(key, event.target.value, event.target.validity.valid)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); apply(); } }} className={`h-10 w-full min-w-0 max-w-full rounded-md border border-slate-300 bg-white px-2 text-sm font-medium text-slate-800 ${focusRing}`} /></label>)}
+            {(["from", "to"] as const).map((key) => <label key={key} className="grid min-w-0 gap-1 text-xs font-semibold text-slate-600">{key === "from" ? "From" : "To"}<input ref={key === "from" ? fromRef : toRef} aria-label={key === "from" ? "From date" : "To date"} aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined} type="date" min="0001-01-01" max={today} value={draft[key]} onChange={(event) => editDate(key, event.target.value, event.target.validity.valid)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); apply(); } }} className={`h-10 w-full min-w-0 max-w-full rounded-md border border-slate-300 bg-white px-2 text-sm font-medium text-slate-800 ${focusRing}`} /></label>)}
           </div>
           <div className="grid min-w-0 gap-5 md:grid-cols-2">{calendar(month, 0)}{calendar(addMonths(month, 1), 1)}</div>
         </div>
